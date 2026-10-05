@@ -477,12 +477,12 @@ export const surveyService = {
   getAllResponses(): Record<string, StudentSurveyResponse> {
     if (!_hasLoadedResponses && typeof window !== 'undefined') {
       _hasLoadedResponses = true
-      supabase.from('attempts').select('id, report_data').then(({ data, error }) => {
+      supabase.from('attempts').select('id, report_data').then(({ data, error }: { data: Array<{ report_data?: Record<string, any> }> | null; error: any }) => {
         if (error) {
           console.warn('Failed to load survey responses from Supabase:', error)
           return
         }
-        data?.forEach((attempt) => {
+        data?.forEach((attempt: { report_data?: Record<string, any> }) => {
           const response = attempt.report_data?.post_assessment_survey as StudentSurveyResponse | undefined
           if (response?.attempt_id) _surveyResponsesCache[response.attempt_id] = response
         })

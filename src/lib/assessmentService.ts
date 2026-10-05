@@ -1,5 +1,5 @@
 import { questionBankService, type QuestionBankItem } from './questionBankService'
-import { supabase } from './supabaseClient'
+import { supabase, isSupabaseConfigured } from './supabaseClient'
 
 export interface StudentFieldConfig {
   id: string
@@ -93,9 +93,6 @@ export interface Assessment {
   createdAt: string
   updatedAt: string
 }
-
-const STORAGE_KEY = 'math_diag_assessments_v2'
-const INITIALIZED_FLAG = 'math_diag_assessments_initialized_v2'
 
 export const defaultAssessmentSettings: AssessmentSettings = {
   timerMode: 'per_section',
@@ -430,14 +427,6 @@ function getInitialSeedAssessments(): Assessment[] {
 let _assessmentsCache: Assessment[] = []
 let _hasLoadedFromDatabase = false
 
-// Clear any old local storage seeds
-if (typeof window !== 'undefined') {
-  try {
-    localStorage.removeItem(STORAGE_KEY)
-    localStorage.removeItem(INITIALIZED_FLAG)
-  } catch {}
-}
-
 export const assessmentService = {
   getStoredAssessments(): Assessment[] {
     if (!_hasLoadedFromDatabase && typeof window !== 'undefined') {
@@ -454,6 +443,10 @@ export const assessmentService = {
    * Sync a single assessment to database
    */
   async syncAssessmentToDatabase(assessment: Assessment): Promise<void> {
+    if (!supabase || !isSupabaseConfigured) {
+      throw new Error('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
+    }
+
     const { error } = await supabase.from('assessments').upsert({
       id: assessment.id,
       title: assessment.title,
@@ -482,6 +475,9 @@ export const assessmentService = {
    */
   async fetchAssessmentsFromDatabase(): Promise<Assessment[]> {
     _hasLoadedFromDatabase = true
+    if (!supabase || !isSupabaseConfigured) {
+      throw new Error('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
+    }
     const { data, error } = await supabase
       .from('assessments')
       .select('*')

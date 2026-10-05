@@ -605,15 +605,6 @@ const _supabaseLessonIdMap = new Map<string, string>()
 let _collectionsCache: QuestionCollection[] = []
 let _hasLoadedCollections = false
 
-// Clear any old browser storage
-if (typeof window !== 'undefined') {
-  try {
-    localStorage.removeItem(STORAGE_KEY)
-    localStorage.removeItem(QB_INITIALIZED_FLAG)
-  } catch {}
-}
-
-
 interface DetectedTaxonomySchema {
   hasTaxonomyTable: boolean
   hasCurriculumTaxonomyTable: boolean
@@ -1965,7 +1956,7 @@ export const questionBankService = {
       .or(taxonomyQuestionFilter)
     if (questionsError) throw questionsError
 
-    const questionIds = (linkedQuestions ?? []).map((question) => question.id)
+    const questionIds = (linkedQuestions ?? []).map((question: { id: string }) => question.id)
     if (questionIds.length > 0) {
       if (deleteLinkedQuestions) {
         await this.deleteQuestions(questionIds)

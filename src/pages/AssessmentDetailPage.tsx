@@ -14,7 +14,6 @@ import {
   type StudentFieldConfig,
 } from '../lib/assessmentService'
 import { questionBankService, type QuestionBankItem } from '../lib/questionBankService'
-import AssessmentSubmissionStatistics from '../components/AssessmentSubmissionStatistics'
 import {
   ArrowLeft,
   Save,
@@ -450,9 +449,6 @@ export const AssessmentDetailPage: React.FC = () => {
           <span>{saveSuccessMessage}</span>
         </div>
       )}
-
-      {/* Statistical Part at the Top for All Submissions */}
-      <AssessmentSubmissionStatistics assessment={assessment} className="mb-6" />
 
       {/* Overview Stats Header Banner */}
       <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-2xs space-y-4">
