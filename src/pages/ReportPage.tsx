@@ -1,3 +1,4 @@
+import { studentScoreDisplay, savedReportScoreMetrics } from '../lib/scoringSchemes'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient'
@@ -6,7 +7,7 @@ import QuestionReviewCard from '../components/Reports/QuestionReviewCard'
 import DomainCard from '../components/Reports/DomainCard'
 import TimeAnalysisSection from '../components/Reports/TimeAnalysisSection'
 import ThreeStateDonutChart from '../components/Reports/ThreeStateDonutChart'
-import { exportElementToPDF } from '../lib/pdfExport'
+import { exportDiagnosticReportPDF } from '../lib/diagnosticPdfExport'
 import {
   STRONG_DOMAIN_THRESHOLD,
   MODERATE_DOMAIN_THRESHOLD,
@@ -19,12 +20,16 @@ import type { CourseItem, QuestionReviewItem, ReportData, TaxonomyType } from '.
 import { surveyService, type ActionPlan, type StudentSurveyResponse } from '../lib/surveyService'
 import { Sparkles, CheckCircle2, Lock, ArrowLeft } from 'lucide-react'
 import { attemptService } from '../lib/attemptService'
+import { loadOrganizationConfig } from '../lib/organizationConfigService'
+import { PublishedStudioReport } from '../components/Reports/PublishedStudioReport'
+import type { PublishedStudioTemplate, PublishedStudioPointer } from '../lib/publishedStudioTypes'
 import {
   reportTemplateService,
   type ReportSectionId,
   type ReportTemplateConfig,
 } from '../lib/reportTemplateService'
 import { useAuth } from '../contexts/AuthContext'
+import { ReportActionBar, ReportLoadingState, ReportQuickNavigation, ReportStatusNotice, ReportUnavailableState } from '../components/student-report/StudentReportWorkspaceUI'
 
 // Configurable thresholds for domain mastery classification
 export const CONFIG_STRONG_THRESHOLD = STRONG_DOMAIN_THRESHOLD // 75%
@@ -343,17 +348,22 @@ export default function ReportPage() {
   const { attemptId } = useParams()
   const [searchParams] = useSearchParams()
   const { session, profile, loading: authLoading } = useAuth()
-  const resumeToken = searchParams.get('token')
+  const resumeToken = new URLSearchParams(window.location.hash.slice(1)).get('token') || searchParams.get('token')
   const isPreview = attemptId === 'demo' || searchParams.get('preview') === '1'
   const role = profile?.role?.trim().toLowerCase()
   const isStaff = Boolean(session && (role === 'admin' || role === 'teacher'))
 
   const [report, setReport] = useState<ReportData | null>(null)
+  const [publishedStudio, setPublishedStudio] = useState<PublishedStudioTemplate | null>(null)
+  const [studentStudio, setStudentStudio] = useState<PublishedStudioTemplate | null>(null)
+  const [showDetailedAnalysis, setShowDetailedAnalysis] = useState(false)
+  const [printDetailedAnalysis, setPrintDetailedAnalysis] = useState(false)
   const [reportAssessmentId, setReportAssessmentId] = useState<string | undefined>()
   const [persistedTemplate, setPersistedTemplate] = useState<ReportTemplateConfig>(() =>
     reportTemplateService.getTemplateForAssessment()
   )
   const [loading, setLoading] = useState(true)
+  const [retryKey, setRetryKey] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isAccessDenied, setIsAccessDenied] = useState(false)
   const [filter, setFilter] = useState<{ type: TaxonomyType; label: string } | null>(null)
@@ -365,101 +375,120 @@ export default function ReportPage() {
     message?: string
   }>({ state: 'idle' })
 
+  const reportCaptureRef = useRef<HTMLDivElement>(null)
   const questionsRef = useRef<HTMLDivElement>(null)
-  const reportContainerRef = useRef<HTMLDivElement>(null)
-  const hasAutoProcessedRef = useRef(false)
+  const exportInProgressRef = useRef(false)
 
   useEffect(() => {
+    if (authLoading) return
+    let active = true
+    setLoading(true)
+    setReport(null)
+    setReportAssessmentId(undefined)
+    setErrorMessage(null)
+    setIsAccessDenied(false)
+    setEmailStatus({ state: 'idle' })
+
     async function load() {
-      if (authLoading) return
-
-      if (!attemptId) {
-        setErrorMessage('No assessment attempt ID was specified.')
-        setLoading(false)
-        return
-      }
-
-      // 1. Preview Mode Authorization:
-      // When previewing a report, only authorized staff (admin/teacher) can view it.
-      if (isPreview) {
-        if (!isStaff) {
-          setIsAccessDenied(true)
-          setErrorMessage("We're sorry, but you do not have access to this page. You must be signed in as an authorized teacher or administrator to view this report preview.")
-          setLoading(false)
-          return
-        }
-
-        // User is authorized staff: deliver the live preview report
-        setIsAccessDenied(false)
-        setReportAssessmentId('preview-assessment')
-        setReport(createSamplePreviewReport(persistedTemplate))
-        setLoading(false)
-        return
-      }
-
-      // 2. Standard Attempt Report Authorization:
-      // Try server database via attemptService
       try {
-        const storedRec = await attemptService.loadAttemptById(attemptId)
-        if (storedRec && storedRec.report_data) {
-          setReportAssessmentId(storedRec.assessment_id)
-          setReport(storedRec.report_data)
-          setIsAccessDenied(false)
-          setLoading(false)
+        if (!attemptId) {
+          setErrorMessage('This report link is incomplete.')
           return
         }
-      } catch (err) {
-        console.warn('AttemptService load failed:', err)
-      }
-
-      // 3. Try direct Supabase attempts table if configured
-      if (isSupabaseConfigured) {
-        try {
-          const { data: dbAtt } = await supabase
-            .from('attempts')
-            .select('report_data, assessment_id')
-            .eq('id', attemptId)
-            .maybeSingle()
-
-          if (dbAtt?.assessment_id) setReportAssessmentId(dbAtt.assessment_id)
-          if (dbAtt && dbAtt.report_data) {
-            setReport(dbAtt.report_data as ReportData)
-            setIsAccessDenied(false)
-            setLoading(false)
+        if (isPreview) {
+          if (!isStaff) {
+            setIsAccessDenied(true)
+            setErrorMessage('Only signed-in teachers and administrators can view report previews.')
             return
           }
+          setReportAssessmentId('preview-assessment')
+          setReport(createSamplePreviewReport(reportTemplateService.getTemplateForAssessment()))
+          return
+        }
 
-          if (resumeToken) {
-            const { data, error } = await supabase.rpc('get_attempt_report', {
-              p_attempt_id: attemptId,
-              p_resume_token: resumeToken,
-            })
+        // The student report RPC verifies the resume token and reads the immutable score.
+        // A failed student RPC must never fall back to a public direct-table read.
+        if (resumeToken) {
+          const { data: confirmed, error: reportError } = await supabase.rpc('get_student_report_v1', {
+            p_attempt_id: attemptId,
+            p_resume_token: resumeToken,
+          })
+          if (!active) return
+          if (!reportError && confirmed?.overall && confirmed?.student_info) {
+            setReport(confirmed as ReportData)
+            return
+          }
+          if (!isStaff) {
+            setIsAccessDenied(Boolean(reportError && /unauthori[sz]ed|permission|invalid token|access denied|jwt/i.test(reportError.message)))
+            setErrorMessage(reportError?.message || 'The completed report is not available yet. Please retry in a moment, using the original secure report link.')
+            return
+          }
+        } else if (!isStaff) {
+          setIsAccessDenied(true)
+          setErrorMessage('Open your report using the secure link provided after completing the assessment.')
+          return
+        }
 
-            if (!error && data) {
-              setReport(data as ReportData)
-              setIsAccessDenied(false)
-              setLoading(false)
-              return
-            }
+        // Staff-only legacy read paths. They do not create or rescore attempts.
+        try {
+          const stored = await attemptService.loadAttemptById(attemptId)
+          if (!active) return
+          if (stored?.report_data) {
+            setReportAssessmentId(stored.assessment_id)
+            setReport(stored.report_data)
+            return
           }
         } catch (err) {
-          console.warn('Supabase report query failed:', err)
+          console.warn('Attempt service report read failed:', err)
         }
+        if (isSupabaseConfigured) {
+          try {
+            const { data: row, error: rowError } = await supabase
+              .from('attempts')
+              .select('report_data, assessment_id')
+              .eq('id', attemptId)
+              .maybeSingle()
+            if (!active) return
+            if (rowError) console.warn('Staff report lookup failed:', rowError)
+            if (row?.assessment_id) setReportAssessmentId(row.assessment_id)
+            if (row?.report_data) {
+              setReport(row.report_data as ReportData)
+              return
+            }
+            if (resumeToken) {
+              const { data: legacy, error: legacyError } = await supabase.rpc('get_attempt_report', {
+                p_attempt_id: attemptId,
+                p_resume_token: resumeToken,
+              })
+              if (!active) return
+              if (!legacyError && legacy) {
+                setReport(legacy as ReportData)
+                return
+              }
+            }
+          } catch (err) {
+            console.warn('Staff report query failed:', err)
+          }
+        }
+        setErrorMessage('We could not find this report. Check the link and try again.')
+      } catch (err) {
+        if (!active) return
+        console.error('Report retrieval failed:', err)
+        setErrorMessage('The report service could not be reached. Your saved assessment is not affected. Check your connection and try again.')
+      } finally {
+        if (active) setLoading(false)
       }
-
-      // 4. Report not found or unauthorized
-      if (!isStaff && !resumeToken) {
-        setIsAccessDenied(true)
-        setErrorMessage("We're sorry, but you do not have access to this page.")
-      } else {
-        setIsAccessDenied(false)
-        setErrorMessage('This assessment report was not found in the database. Please complete an assessment or select a valid attempt record.')
-      }
-      setLoading(false)
     }
+    void load()
+    return () => { active = false }
+  }, [attemptId, resumeToken, isStaff, isPreview, authLoading, retryKey])
 
-    load()
-  }, [attemptId, resumeToken, isStaff, isPreview, authLoading, persistedTemplate])
+  // Keep staff sample data in sync with the report template without re-fetching real attempts.
+  useEffect(() => {
+    if (isPreview && isStaff && !authLoading) {
+      setReport(createSamplePreviewReport(persistedTemplate))
+    }
+  }, [isPreview, isStaff, authLoading, persistedTemplate])
 
   useEffect(() => {
     let active = true
@@ -473,6 +502,42 @@ export default function ReportPage() {
       active = false
     }
   }, [reportAssessmentId, attemptId, resumeToken])
+
+  // Student-safe RPC: returns ONLY the snapshot pinned to this completed attempt.
+  // Never use a live organization setting or current template for student reports.
+  useEffect(() => {
+    let active = true
+    setStudentStudio(null)
+    if (!attemptId || !resumeToken || isPreview || !report) return () => { active = false }
+    async function loadPinnedTemplate() {
+      const { data, error } = await supabase.rpc('get_student_studio_template_v1', {
+        p_attempt_id: attemptId,
+        p_resume_token: resumeToken,
+      })
+      if (!active || error || !data || typeof data !== 'object') return
+      const snapshot = data as PublishedStudioTemplate
+      if (snapshot.schemaVersion === 1 && Array.isArray(snapshot.layout?.elements)) setStudentStudio(snapshot)
+    }
+    void loadPinnedTemplate()
+    return () => { active = false }
+  }, [attemptId, resumeToken, isPreview, report])
+
+  // Staff-only read: student resume tokens must never grant access to organization settings.
+  // The student report remains unchanged until a dedicated, authorized template-delivery RPC exists.
+  useEffect(() => {
+    let active = true
+    if (!isStaff || authLoading) { setPublishedStudio(null); return }
+    async function loadPublishedStudio() {
+      try {
+        const pointer = await loadOrganizationConfig<PublishedStudioPointer>('report-studio.published.v1')
+        if (!pointer?.versionKey) return
+        const snapshot = await loadOrganizationConfig<PublishedStudioTemplate>(pointer.versionKey)
+        if (active && snapshot?.schemaVersion === 1 && Array.isArray(snapshot.layout?.elements)) setPublishedStudio(snapshot)
+      } catch { if (active) setPublishedStudio(null) }
+    }
+    void loadPublishedStudio()
+    return () => { active = false }
+  }, [isStaff, authLoading])
 
   // Analytics computations
   const templateConfig = useMemo<ReportTemplateConfig>(() => {
@@ -594,45 +659,47 @@ export default function ReportPage() {
     return plans[0]
   }, [report, attemptId])
 
-  // Auto-download as PDF and trigger email delivery once report is ready
   useEffect(() => {
-    if (!report || !analytics || attemptId === 'demo' || hasAutoProcessedRef.current) return
+    if (!printDetailedAnalysis) return
+    const reset = () => setPrintDetailedAnalysis(false)
+    window.addEventListener('afterprint', reset)
+    return () => window.removeEventListener('afterprint', reset)
+  }, [printDetailedAnalysis])
 
-    // Small delay to ensure all KaTeX equations and fonts render completely before capture
-    const timer = setTimeout(() => {
-      if (hasAutoProcessedRef.current) return
-      hasAutoProcessedRef.current = true
-      handleExportAndEmail(false)
-    }, 1200)
+  // PDF capture uses html2canvas and can be expensive for long diagnostic reports.
+  // Do not automatically capture the entire report on initial navigation: this
+  // can block the browser's main thread before the student sees their score.
+  // Download PDF and Email remain explicit actions in ReportActionBar.
+  // Automatic PDF/email delivery is intentionally paused until a safe,
+  // server-side delivery mechanism with idempotency is implemented.
 
-    return () => clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report, analytics])
-
-  async function handleExportAndEmail(isUserInitiated = true) {
-    if (!reportContainerRef.current || !analytics || !report) return
-
+  async function handleExportAndEmail(sendEmail = false) {
+    if (exportInProgressRef.current || !analytics || !report) return
+    setEmailStatus({ state: 'sending', message: sendEmail ? 'Preparing your PDF before sending the email…' : 'Preparing your PDF download…' })
+    exportInProgressRef.current = true
     setPdfGenerating(true)
-    const sanitizedStudentName = analytics.studentName.replace(/[^a-zA-Z0-9_-]/g, '_')
-    const sanitizedExamName = report.student_info.assessment_name.replace(/[^a-zA-Z0-9_-]/g, '_')
+    const sanitizedStudentName = analytics.studentName.replace(/[^a-zA-Z0-9_-]/g, '_') || 'Student'
+    const sanitizedExamName = report.student_info.assessment_name.replace(/[^a-zA-Z0-9_-]/g, '_') || 'Assessment'
     const dateStr = new Date().toISOString().split('T')[0]
     const filename = `Report_${sanitizedStudentName}_${sanitizedExamName}_${dateStr}.pdf`
-
     try {
-      // Generate PDF (and auto-download to disk)
-      const exportResult = await exportElementToPDF({
-        element: reportContainerRef.current,
+      const exportResult = await exportDiagnosticReportPDF({
+        report,
+        studentName: analytics.studentName,
         filename,
+        plan: matchedActionPlan,
+        studio: studentStudio, // Always export the attempt-pinned version; never substitute today's template.
+        element: reportCaptureRef.current,
         autoDownload: true,
       })
-
-      // If student or parent email is provided, dispatch email via Supabase edge function
-      if (analytics.studentEmail) {
-        setEmailStatus({
-          state: 'sending',
-          message: `Sending diagnostic PDF report to ${analytics.studentEmail}...`,
-        })
-
+      if (!sendEmail) setEmailStatus({ state: 'success', message: 'Your PDF is ready and the download has started.' })
+      if (sendEmail && (isPreview || !analytics.studentEmail)) {
+        setEmailStatus({ state: 'error', message: isPreview
+          ? 'Email sending is unavailable in report preview. Your PDF download has started.'
+          : 'No student email address is available for this assessment. Your PDF download has started.' })
+      }
+      if (sendEmail && !isPreview && analytics.studentEmail) {
+        setEmailStatus({ state: 'sending', message: `Sending report to ${analytics.studentEmail}…` })
         try {
           const { error: fnError } = await supabase.functions.invoke('send-report-email', {
             body: {
@@ -644,38 +711,18 @@ export default function ReportPage() {
               scorePercentage: report.overall.percentage,
             },
           })
-
-          if (fnError) {
-            console.warn('Email dispatch notice:', fnError)
-            setEmailStatus({
-              state: 'error',
-              message: `PDF saved locally. (Email delivery to ${analytics.studentEmail} could not be completed).`,
-            })
-          } else {
-            setEmailStatus({
-              state: 'success',
-              message: `Report successfully downloaded and emailed to ${analytics.studentEmail}`,
-            })
-          }
-        } catch (emailErr) {
-          console.warn('Edge function invoke error:', emailErr)
-          setEmailStatus({
-            state: 'error',
-            message: `PDF saved locally. (Email delivery could not be completed).`,
-          })
+          if (fnError) throw fnError
+          setEmailStatus({ state: 'success', message: `PDF downloaded. Email request submitted for ${analytics.studentEmail}.` })
+        } catch (err) {
+          console.warn('Report email dispatch failed:', err)
+          setEmailStatus({ state: 'error', message: 'PDF downloaded, but email delivery could not be confirmed. You can retry using Email.' })
         }
-      } else if (isUserInitiated) {
-        setEmailStatus({
-          state: 'success',
-          message: 'Diagnostic PDF report generated and downloaded.',
-        })
       }
     } catch (err) {
-      console.error('PDF export error:', err)
-      if (isUserInitiated) {
-        window.print()
-      }
+      console.error('PDF export failed:', err)
+      setEmailStatus({ state: 'error', message: 'PDF download failed. Please try again, or choose Print and save as PDF.' })
     } finally {
+      exportInProgressRef.current = false
       setPdfGenerating(false)
     }
   }
@@ -700,69 +747,33 @@ export default function ReportPage() {
   }, [report, filter])
 
   function handleSelectTaxonomy(type: TaxonomyType, label: string) {
+    setShowDetailedAnalysis(true)
     setFilter((prev) => (prev && prev.type === type && prev.label === label ? null : { type, label }))
-    questionsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    window.requestAnimationFrame(() => questionsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
   }
 
-  if (loading) {
-    return (
-      <div className="grid min-h-screen place-items-center bg-slate-50 text-slate-600">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-3 border-primary-600 border-t-transparent" />
-          <p className="text-sm font-medium">Generating comprehensive diagnostic report…</p>
-        </div>
-      </div>
-    )
-  }
+  if (loading) return <ReportLoadingState />
 
   if (isAccessDenied) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
-        <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-sm text-center space-y-4">
-          <div className="w-14 h-14 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
-            <Lock className="h-7 w-7" />
-          </div>
-          <h1 className="text-lg font-bold text-slate-900">Access Restricted</h1>
-          <p className="text-xs text-slate-600 leading-relaxed">
-            {errorMessage || "We're sorry, but you do not have access to this page."}
-          </p>
-          <div className="pt-2 flex flex-col gap-2">
-            <Link
-              to="/login"
-              className="w-full inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition"
-            >
-              Sign In to Your Account
-            </Link>
-            <Link
-              to="/"
-              className="text-xs font-semibold text-slate-500 hover:text-slate-700 py-1"
-            >
-              Return to Home
-            </Link>
-          </div>
-        </div>
-      </div>
-    )
+    return <ReportUnavailableState
+      restricted
+      title="Secure report access required"
+      message={errorMessage || 'This report requires a valid student link or staff authorization.'}
+    />
   }
 
   if (errorMessage || !report || !analytics) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
-        <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h1 className="text-xl font-semibold text-slate-900">Diagnostic report unavailable</h1>
-          <p className="mt-2 text-sm text-slate-600">{errorMessage}</p>
-          <Link
-            to="/"
-            className="mt-4 inline-flex rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white"
-          >
-            Return to Assessments
-          </Link>
-        </div>
-      </div>
-    )
+    return <ReportUnavailableState
+      title="Report temporarily unavailable"
+      message={errorMessage || 'The saved report could not be loaded.'}
+      onRetry={() => setRetryKey((value) => value + 1)}
+    />
   }
 
   const { student_info, overall, breakdowns, questions, courses, org_settings } = report
+  const studentScore = studentScoreDisplay(report.scoring)
+  const savedScoreMetrics = savedReportScoreMetrics(report.scoring)
+  const isExamScheme = Boolean(studentScore?.maximum)
   const { domainPerf, timeAnalysis, threeState, studentName, completedLabel, durationLabel, avgTime } =
     analytics
 
@@ -779,8 +790,12 @@ export default function ReportPage() {
       return rule.operator === 'equals' ? grade === expected : grade.includes(expected)
     }
 
+    // A missing practice score must never be treated as zero or as a percentage.
+    if (rule.metric === 'practiceScaledScore' && savedScoreMetrics.practiceScaledScore === null) return false
     const actualValue =
-      rule.metric === 'score'
+      rule.metric === 'practiceScaledScore'
+        ? savedScoreMetrics.practiceScaledScore!
+        : rule.metric === 'score'
         ? overall.percentage
         : rule.metric === 'totalTimeMinutes'
         ? student_info.total_time_seconds / 60
@@ -793,6 +808,24 @@ export default function ReportPage() {
     if (rule.operator === 'equals') return actualValue === expectedValue
     return actualValue >= expectedValue
   }
+  const matchingFeedbackRules = (templateConfig.feedbackRules || []).filter(rule => {
+    // Only publish meaningful, configured feedback; never expose a draft rule.
+    if (!rule.enabled || !rule.criteria?.length) return false
+    if (!rule.title?.trim() || /^new rule$/i.test(rule.title.trim())) return false
+    if (!rule.message?.trim() && !rule.recommendation?.trim()) return false
+    const matches = rule.criteria.map(criterion => {
+      const value = criterion.metric === 'percentage' ? overall.percentage
+        : criterion.metric === 'practiceScaledScore' ? savedScoreMetrics.practiceScaledScore
+        : criterion.metric === 'correctCount' ? overall.correct_count
+        : criterion.metric === 'incorrectCount' ? threeState.incorrectCount
+        : threeState.unansweredCount
+      if (value === null || value === undefined || !Number.isFinite(Number(value)) || !Number.isFinite(criterion.value)) return false
+      if (criterion.operator === 'gte') return value >= criterion.value
+      if (criterion.operator === 'lte') return value <= criterion.value
+      return value === criterion.value
+    })
+    return rule.match === 'any' ? matches.some(Boolean) : matches.every(Boolean)
+  })
   const isSectionFieldVisible = (sectionId: ReportSectionId, fieldId: string) =>
     templateConfig.sectionFields?.[sectionId]?.includes(fieldId) ?? true
 
@@ -827,16 +860,16 @@ export default function ReportPage() {
     ]
 
   return (
-    <div className="print-page min-h-screen bg-slate-50 text-slate-900">
+    <div ref={reportCaptureRef} className="print-page ms-report-shell min-h-screen bg-slate-50 text-slate-900">
       {/* Top Banner when in Preview Mode */}
       {isPreview && (
         <div className="no-print bg-slate-900 text-white px-4 py-2.5 text-xs font-medium flex items-center justify-between shadow-xs sticky top-0 z-30">
           <div className="flex items-center gap-2">
-            <span className="bg-blue-600 text-white px-2 py-0.5 rounded-md font-bold uppercase tracking-wider text-[10px]">
+            <span className="bg-blue-600 text-white px-2 py-0.5 rounded-md font-bold uppercase tracking-wider text-xs">
               Preview Mode
             </span>
             <span className="text-slate-200">
-              Live Preview: Diagnostic Score Report Template with your active rubrics & sections
+              Preview your report design
             </span>
           </div>
           <Link
@@ -849,83 +882,70 @@ export default function ReportPage() {
         </div>
       )}
 
-      {/* Sticky Header Toolbar (no-print) */}
-      <div className={`no-print ${isPreview ? 'relative' : 'sticky top-0'} z-20 border-b border-slate-200 bg-white/95 backdrop-blur`}>
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3">
-          <div>
-            <div className="text-sm font-semibold text-slate-900">
-              {templateConfig.title || org_settings?.org_name || 'Diagnostic Performance Assessment'}
-            </div>
-            <div className="text-xs text-slate-500">
-              {templateConfig.subtitle || 'Student Diagnostic Evaluation'} · {student_info.assessment_name}
-            </div>
+      {isStaff && !isPreview && attemptId && (
+        <nav aria-label="Staff report navigation" className="no-print flex flex-wrap items-center justify-between gap-3 border-b border-blue-100 bg-blue-50 px-4 py-2.5 text-xs text-blue-950">
+          <span className="font-semibold">Student report</span>
+          <div className="flex flex-wrap gap-3">
+            {reportAssessmentId && <Link className="font-semibold underline" to={`/admin/assessments/${reportAssessmentId}/results`}>Back to results</Link>}
+            <Link className="font-semibold underline" to={`/admin/attempts/${attemptId}`}>Assessment details</Link>
           </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => handleExportAndEmail(true)}
-              disabled={pdfGenerating}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white shadow-xs hover:bg-blue-700 disabled:opacity-50 transition"
-            >
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
-                />
-              </svg>
-              {pdfGenerating ? 'Generating PDF...' : 'Download PDF'}
-            </button>
-
-            <button
-              onClick={() => window.print()}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-            >
-              Print
-            </button>
-          </div>
+        </nav>
+      )}
+      {studentStudio && report && !isPreview && (
+        <PublishedStudioReport template={studentStudio} report={report} />
+      )}
+      {isStaff && !studentStudio && publishedStudio && report && !isPreview && (
+        <div className="no-print"><p className="mx-auto max-w-5xl px-4 pt-5 text-xs text-amber-800">Staff preview only — this is the organization's current template, not a version saved with this attempt. It will not be used for this report's PDF.</p><PublishedStudioReport template={publishedStudio} report={report} /></div>
+      )}
+      <ReportActionBar
+        title={templateConfig.title || org_settings?.org_name || 'Diagnostic Performance Assessment'}
+        subtitle={`${templateConfig.subtitle || 'Student Diagnostic Evaluation'} · ${student_info.assessment_name}`}
+        date={completedLabel}
+        busy={pdfGenerating}
+        canEmail={Boolean(analytics.studentEmail)}
+        preview={isPreview}
+        onDownload={() => { void handleExportAndEmail(false) }}
+        onEmail={() => { void handleExportAndEmail(true) }}
+        onPrint={() => { setPrintDetailedAnalysis(true); window.requestAnimationFrame(() => window.print()) }}
+      />
+      {emailStatus.state !== 'idle' && <ReportStatusNotice
+        tone={emailStatus.state}
+        onDismiss={() => setEmailStatus({ state: 'idle' })}
+      >{emailStatus.message}</ReportStatusNotice>}
+      {studentStudio && !isPreview && (
+        <div className="no-print mx-auto mt-4 flex max-w-5xl flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
+          <p className="text-sm text-slate-600">Need individual answers, explanations, or a more detailed breakdown?</p>
+          <button type="button" aria-expanded={showDetailedAnalysis} aria-controls="report-detailed-analysis" onClick={() => setShowDetailedAnalysis(value => !value)} className="rounded-lg border border-teal-700 px-4 py-2 text-sm font-semibold text-teal-800 hover:bg-teal-50">{showDetailedAnalysis ? 'Hide detailed analysis' : 'View detailed analysis'}</button>
         </div>
-
-        {/* Email delivery & notification bar */}
-        {emailStatus.state !== 'idle' && (
-          <div
-            className={`px-4 py-2 text-xs font-medium border-t ${
-              emailStatus.state === 'sending'
-                ? 'bg-blue-50 text-blue-800 border-blue-100'
-                : emailStatus.state === 'success'
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-100'
-                : 'bg-amber-50 text-amber-800 border-amber-100'
-            }`}
-          >
-            <div className="mx-auto max-w-5xl flex items-center justify-between">
-              <span>{emailStatus.message}</span>
-              <button
-                onClick={() => setEmailStatus({ state: 'idle' })}
-                className="text-xs opacity-70 hover:opacity-100 font-bold ml-2"
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
+      )}
+      <div id="report-detailed-analysis" className={studentStudio && !isPreview && !showDetailedAnalysis && !printDetailedAnalysis ? 'hidden print:block' : undefined}>
+      <ReportQuickNavigation sections={[
+        ...(shouldShowSection('showHeroMetrics') ? [{ id: 'report-overview', label: 'Overview' }] : []),
+        ...(shouldShowSection('showThreeStateDonut') && !isExamScheme ? [{ id: 'report-breakdown', label: 'Score breakdown' }] : []),
+        ...(shouldShowSection('showQuestionSolutions') ? [{ id: 'report-questions', label: 'Question review' }] : []),
+        ...(shouldShowSection('showCourseRecommendations') ? [{ id: 'report-next-steps', label: 'Next steps' }] : []),
+      ]} />
 
       {/* Main Printable Content Container */}
-      <div ref={reportContainerRef} className="mx-auto max-w-5xl space-y-6 px-4 py-6">
-        {/* Custom Educator Guidance / Top Instructions (if configured) */}
-        {templateConfig.customNotesBody && (
-          <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4 text-xs text-blue-900 shadow-2xs">
-            <h4 className="font-bold uppercase tracking-wider text-blue-950 mb-1 flex items-center gap-1.5">
-              <span>📌</span> {templateConfig.customNotesTitle || 'Assessment Guidance'}
-            </h4>
-            <p className="leading-relaxed text-blue-800">{templateConfig.customNotesBody}</p>
-          </div>
-        )}
+      <div className="ms-report-content mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6 sm:py-8">
+        {/* Teacher-authored setup guidance stays in Scoring & Criteria.
+            It is not a student result and must not appear on report pages or PDFs. */}
 
+        {matchingFeedbackRules.length > 0 && (
+          <section className="space-y-3" aria-label="Personalized feedback">
+            <h2 className="text-lg font-bold text-slate-900">Personalized performance feedback</h2>
+            {matchingFeedbackRules.map(rule => (
+              <div key={rule.id} className="rounded-2xl border border-blue-100 bg-white p-5 shadow-sm">
+                <h3 className="font-bold text-slate-900">{rule.title}</h3>
+                {rule.message && <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{rule.message}</p>}
+                {rule.recommendation && <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-blue-800"><strong>Recommended next step: </strong>{rule.recommendation}</p>}
+              </div>
+            ))}
+          </section>
+        )}
         {/* Hero Section */}
         {shouldShowSection('showHeroMetrics') && (
-          <section className="rounded-3xl bg-gradient-to-br from-primary-600 via-primary-700 to-primary-900 p-6 sm:p-8 text-white shadow-floating">
+          <section id="report-overview" className="ms-report-hero scroll-mt-28 rounded-3xl p-6 sm:p-9 text-white shadow-floating">
             <div className="flex flex-wrap items-center justify-between gap-2">
               {isSectionFieldVisible('showHeroMetrics', 'banner') && <div className="text-xs font-medium uppercase tracking-wider text-white/80">
                 {templateConfig.headerBannerText || 'Student Diagnostic Evaluation'}
@@ -952,7 +972,7 @@ export default function ReportPage() {
 
             <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
               {isSectionFieldVisible('showHeroMetrics', 'score') && (
-                <HeroMetric label="Overall Score" value={`${overall.percentage}%`} />
+                <HeroMetric label={studentScore?.label || "Overall Score"} value={studentScore?.value || `${overall.percentage}%`} />
               )}
               {isSectionFieldVisible('showHeroMetrics', 'classification') && (
                 <HeroMetric
@@ -970,9 +990,19 @@ export default function ReportPage() {
           </section>
         )}
 
+        {studentScore && <section id="saved-scoring" className="ms-report-score rounded-2xl border p-5 sm:p-6">
+          <div className="ms-report-section-kicker">SCORE DETAILS</div>
+          <h2 className="mt-1 text-lg font-semibold text-slate-900">{isExamScheme ? 'Practice exam result' : 'Assessment result'}</h2>
+          {!(shouldShowSection('showHeroMetrics') && isSectionFieldVisible('showHeroMetrics', 'score')) && (
+            <p className="ms-report-score-value mt-3 text-3xl font-bold tabular-nums">{studentScore.value}</p>
+          )}
+          {studentScore.lines.length > 0 && <div className="mt-3 grid gap-2 sm:grid-cols-2">{studentScore.lines.map((line,i)=><p key={i} className="rounded-lg bg-white px-3 py-2 text-xs font-medium text-slate-800">{line}</p>)}</div>}
+          {studentScore.note && <p className="mt-3 text-xs text-slate-600">{studentScore.note}</p>}
+        </section>}
+
         {/* Three-State Question Classification Donut & Breakdown */}
-        {shouldShowSection('showThreeStateDonut') && (
-          <section>
+        {shouldShowSection('showThreeStateDonut') && !isExamScheme && (
+          <section id="report-breakdown" className="scroll-mt-28">
             <div className="mb-2">
               <h2 className="text-lg font-semibold text-slate-900">Scoring & Response Status</h2>
               <p className="text-xs sm:text-sm text-slate-500">
@@ -1003,7 +1033,7 @@ export default function ReportPage() {
             section.tone === 'emerald' ? '✓' : section.tone === 'amber' ? '•' : '!'
 
           return (
-            <section key={section.key} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <section key={section.key} className="ms-report-panel rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <div className="flex items-center gap-2">
@@ -1039,6 +1069,7 @@ export default function ReportPage() {
                       domain={domain}
                       type={section.tone === 'rose' ? 'weak' : section.tone === 'amber' ? 'moderate' : 'strong'}
                       visibleFields={templateConfig.sectionFields?.[section.sectionId]}
+                      hideRawCounts={isExamScheme}
                     />
                   ))
                 )}
@@ -1068,6 +1099,7 @@ export default function ReportPage() {
               <TaxonomyTree
                 breakdowns={displayedBreakdowns}
                 visibleFields={templateConfig.sectionFields?.showTaxonomyTree}
+                hideRawCounts={isExamScheme}
                 onSelect={handleSelectTaxonomy}
                 activeFilter={filter}
               />
@@ -1076,7 +1108,7 @@ export default function ReportPage() {
         )}
 
         {/* Diagnostic Behavior & Mistake Types */}
-        {shouldShowSection('showErrorPatterns') && (
+        {shouldShowSection('showErrorPatterns') && !isExamScheme && (
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <SectionTitle
               title="Error Pattern Diagnosis"
@@ -1111,15 +1143,16 @@ export default function ReportPage() {
         {shouldShowSection('showQuestionSolutions') && (
           <section
             ref={questionsRef}
-            className="scroll-mt-24 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
+            id="report-questions"
+            className="scroll-mt-28 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
           >
             <div className="flex items-center justify-between gap-3">
               <SectionTitle
-                title="Question Review & Solutions"
+                title="Question Review"
                 subtitle={
                   filter
                     ? `Filtered by ${filter.type}: ${filter.label}`
-                    : 'Detailed step-by-step diagnostic solutions for each question'
+                    : 'Review each question, your recorded response, and the available diagnostic details'
                 }
               />
               {filter && (
@@ -1135,7 +1168,7 @@ export default function ReportPage() {
             <div className="mt-4 space-y-3">
               {visibleQuestions.length === 0 ? (
                 <p className="text-sm text-slate-500 py-6 text-center">
-                  No questions match this filter criteria.
+                  No questions match your selection.
                 </p>
               ) : (
                 visibleQuestions.map((q: QuestionReviewItem) => (
@@ -1162,14 +1195,14 @@ export default function ReportPage() {
                   <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-blue-100 text-blue-700 text-xs font-bold">
                     <Sparkles className="h-3.5 w-3.5" />
                   </span>
-                  <h2 className="text-lg font-semibold text-slate-900">Personalized Action Roadmap</h2>
+                  <h2 className="text-lg font-semibold text-slate-900">Your Learning Plan</h2>
                 </div>
                 <p className="mt-0.5 text-xs sm:text-sm text-slate-500">
-                  Phased improvement roadmap calibrated to your diagnostic test score and reflection
+                  Suggested next steps based on your assessment results
                 </p>
               </div>
               {isSectionFieldVisible('showActionPlan', 'audience') && <span className="self-start sm:self-auto rounded-full bg-blue-50 border border-blue-200 px-3 py-1 text-xs font-semibold text-blue-800">
-                {matchedActionPlan.target_audience || 'Personalized Track'}
+                {matchedActionPlan.target_audience || 'Recommended plan'}
               </span>}
             </div>
 
@@ -1187,7 +1220,7 @@ export default function ReportPage() {
               {/* Milestones */}
               {isSectionFieldVisible('showActionPlan', 'milestones') && matchedActionPlan.milestones?.length > 0 && (
                 <div className="pt-3 border-t border-slate-200/80 space-y-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-400 block">
                     Phased Milestone Progression
                   </span>
                   <div className="grid gap-2.5 sm:grid-cols-2">
@@ -1198,20 +1231,20 @@ export default function ReportPage() {
                       >
                         <div className="flex items-center justify-between gap-1 font-semibold text-slate-900">
                           <span className="flex items-center gap-1.5 truncate">
-                            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold">
+                            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-100 text-blue-700 text-xs font-bold">
                               {mIdx + 1}
                             </span>
                             <span className="truncate">{m.title}</span>
                           </span>
-                          <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 shrink-0">
+                          <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs font-medium text-slate-600 shrink-0">
                             {m.timeframe}
                           </span>
                         </div>
-                        <p className="text-[11px] text-slate-500 pl-6 leading-relaxed">
+                        <p className="text-xs text-slate-500 pl-6 leading-relaxed">
                           {m.description}
                         </p>
                         {m.tasks && m.tasks.length > 0 && (
-                          <ul className="list-disc list-inside text-[10px] text-slate-600 pl-6 space-y-0.5 pt-1">
+                          <ul className="list-disc list-inside text-xs text-slate-600 pl-6 space-y-0.5 pt-1">
                             {m.tasks.map((task, ti) => (
                               <li key={ti}>{task}</li>
                             ))}
@@ -1226,7 +1259,7 @@ export default function ReportPage() {
               {/* Weekly Routine */}
               {isSectionFieldVisible('showActionPlan', 'routine') && matchedActionPlan.weekly_routine?.length > 0 && (
                 <div className="pt-3 border-t border-slate-200/80 space-y-1.5">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-400 block">
                     Recommended Study Rhythm
                   </span>
                   <div className="flex flex-wrap gap-2">
@@ -1250,8 +1283,8 @@ export default function ReportPage() {
                   <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 text-xs text-slate-700 flex items-start gap-2">
                     <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
                     <div>
-                      <span className="font-semibold text-emerald-950 block text-[11px] uppercase tracking-wider">
-                        Key Rule of Success
+                      <span className="font-semibold text-emerald-950 block text-xs uppercase tracking-wider">
+                        Helpful advice
                       </span>
                       <p className="italic text-slate-700 mt-0.5">
                         "{matchedActionPlan.prescriptive_advice[0]}"
@@ -1266,7 +1299,7 @@ export default function ReportPage() {
 
         {/* Actionable Recommendations & Courses */}
         {shouldShowSection('showCourseRecommendations') && (
-          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <section id="report-next-steps" className="scroll-mt-28 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <SectionTitle
               title="Prescriptive Study Recommendations"
               subtitle="Tailored next steps based on your diagnostic results"
@@ -1306,12 +1339,13 @@ export default function ReportPage() {
         {/* Footer Disclaimer */}
         {templateConfig.footerDisclaimer && (
           <div className="pt-4 border-t border-slate-200 text-center">
-            <p className="text-[11px] text-slate-400 italic">
+            <p className="text-xs text-slate-400 italic">
               {templateConfig.footerDisclaimer}
             </p>
           </div>
         )}
       </div>
+      </div>{/* Detailed legacy report */}
     </div>
   )
 }

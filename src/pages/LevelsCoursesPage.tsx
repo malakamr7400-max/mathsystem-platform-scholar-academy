@@ -4,7 +4,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import AdminLayout from '../components/AdminLayout'
 import { supabase } from '../lib/supabaseClient'
-import { questionBankService } from '../lib/questionBankService'
+import { LevelsCoursesHero, LevelsCoursesStats, LevelsCoursesTabs, LevelsCoursesEmpty, type WorkspaceView } from '../components/levels-courses/LevelsCoursesUI'
 import { useUnsavedChanges } from '../contexts/UnsavedChangesContext'
 
 // Validation Schemas
@@ -66,6 +66,10 @@ export default function LevelsCoursesPage() {
   const [orgId, setOrgId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [showArchived, setShowArchived] = useState(false)
+  const [view, setView] = useState<WorkspaceView>('levels')
+  const [levelSearch, setLevelSearch] = useState('')
+  const [courseSearch, setCourseSearch] = useState('')
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [toasts, setToasts] = useState<ToastMessage[]>([])
 
   // Modal states for Levels
@@ -142,6 +146,7 @@ export default function LevelsCoursesPage() {
 
   async function fetchData() {
     setLoading(true)
+    setLoadError(null)
 
     try {
       const { data: orgData, error: orgError } = await supabase.from('organizations').select('id').limit(1).single()
@@ -149,19 +154,8 @@ export default function LevelsCoursesPage() {
       const resolvedOrgId = orgData?.id || null
       if (resolvedOrgId) setOrgId(resolvedOrgId)
 
-      // 1. Resolve Curriculum Taxonomy Domains as the authoritative categories list
-      const tax = questionBankService.getTaxonomy()
-      const unifiedCategories: CategoryOption[] = Object.keys(tax).map((domainName) => {
-        const dInfo = tax[domainName]
-        const norm = domainName.trim().toLowerCase()
-        const codePrefix = dInfo?.code ? `[${dInfo.code}] ` : ''
-        return {
-          id: `cat-${norm.replace(/[^a-z0-9]/g, '-')}`,
-          name: `${codePrefix}${domainName.trim()}`,
-        }
-      })
-      setCategories(unifiedCategories)
-
+      // Use actual database category IDs: level_categories has a foreign key to categories.
+      // Generated taxonomy labels are not valid IDs for this relation.
       const [levelsRes, catRes, levelCatRes, coursesRes, linksRes] = await Promise.all([
         supabase
           .from('levels')
@@ -177,6 +171,7 @@ export default function LevelsCoursesPage() {
       if (queryError) throw queryError
 
       setLevels(levelsRes.data ?? [])
+      setCategories((catRes.data ?? []) as CategoryOption[])
 
       const catMap: Record<string, string[]> = {}
       levelCatRes.data?.forEach((link: any) => {
@@ -199,7 +194,9 @@ export default function LevelsCoursesPage() {
       setLevelCourseMap(courseMap)
     } catch (err: any) {
       console.error('Fetch data error:', err)
-      addToast('error', 'Failed to load levels and taxonomy.')
+      const message = err instanceof Error ? err.message : 'Failed to load levels and courses.'
+      setLoadError(message)
+      addToast('error', message)
     } finally {
       setLoading(false)
     }
@@ -321,20 +318,25 @@ export default function LevelsCoursesPage() {
 
         if (insertError || !newLevel) throw insertError || new Error('Failed to create level')
 
-        // Link categories if selected
+        // Link categories if selected. Do not claim success for links rejected by the database.
+        let savedCategoryIds: string[] = []
         if (formData.category_ids.length > 0) {
           const rows = formData.category_ids.map((cid: string) => ({
             level_id: newLevel.id,
             category_id: cid,
           }))
           const { error: catError } = await supabase.from('level_categories').insert(rows)
-          if (catError) console.warn('Category link error:', catError)
+          if (catError) {
+            addToast('error', 'Level created, but category links could not be saved. Please retry linking them.')
+          } else {
+            savedCategoryIds = formData.category_ids
+          }
         }
 
         setLevels((prev) => [...prev, newLevel])
         setLevelCategoryMap((prev) => ({
           ...prev,
-          [newLevel.id]: formData.category_ids,
+          [newLevel.id]: savedCategoryIds,
         }))
 
         addToast('success', `New performance tier "${formData.name}" created.`)
@@ -352,20 +354,18 @@ export default function LevelsCoursesPage() {
     }
   }
 
-  // Soft-delete level (deactivate)
+  // Deactivation is a soft delete; only reflect it after Supabase confirms the update.
   async function handleDeleteLevel(lvl: LevelRow) {
-    // Optimistic UI update
-    const previousLevels = [...levels]
-    const updated = levels.map((l) => (l.id === lvl.id ? { ...l, is_active: false } : l))
-    setLevels(updated)
-    addToast('success', `Level "${lvl.name}" deactivated.`)
-
+    if (!window.confirm(`Deactivate "${lvl.name}"? Existing results are not deleted.`)) return
     try {
-      await supabase
-        .from('levels')
-        .update({ is_active: false, updated_at: new Date().toISOString() })
-        .eq('id', lvl.id)
-    } catch {}
+      const { error } = await supabase.from('levels')
+        .update({ is_active: false, updated_at: new Date().toISOString() }).eq('id', lvl.id)
+      if (error) throw error
+      setLevels(prev => prev.map(l => l.id === lvl.id ? { ...l, is_active: false } : l))
+      addToast('success', `Level "${lvl.name}" deactivated.`)
+    } catch (err) {
+      addToast('error', err instanceof Error ? err.message : 'Could not deactivate level.')
+    }
   }
 
   // Restore archived level
@@ -391,98 +391,61 @@ export default function LevelsCoursesPage() {
     }
   }
 
-  // Reorder Levels via Up/Down arrow buttons
-  async function handleMoveLevel(index: number, direction: 'up' | 'down') {
+  // Reorder by the full ordered array; never use an index from a filtered view.
+  async function handleMoveLevel(levelId: string, direction: 'up' | 'down') {
+    const ordered = [...levels].sort((a, b) => a.display_order - b.display_order)
+    const index = ordered.findIndex(l => l.id === levelId)
     const targetIndex = direction === 'up' ? index - 1 : index + 1
-    if (targetIndex < 0 || targetIndex >= levels.length) return
-
-    const newLevels = [...levels]
-    const current = newLevels[index]
-    const target = newLevels[targetIndex]
-
-    // Swap positions
-    newLevels[index] = target
-    newLevels[targetIndex] = current
-
-    // Reassign sequential display_order
-    const updatedWithOrder = newLevels.map((l, i) => ({
-      ...l,
-      display_order: i + 1,
-    }))
-
-    const previousLevels = [...levels]
-    setLevels(updatedWithOrder)
-
+    if (index < 0 || targetIndex < 0 || targetIndex >= ordered.length) return
+    const current = ordered[index]
+    const target = ordered[targetIndex]
     try {
-      // Persist new order for swapped items
-      await Promise.all([
-        supabase
-          .from('levels')
-          .update({ display_order: targetIndex + 1, updated_at: new Date().toISOString() })
-          .eq('id', current.id),
-        supabase
-          .from('levels')
-          .update({ display_order: index + 1, updated_at: new Date().toISOString() })
-          .eq('id', target.id),
-      ])
-
+      const first = await supabase.from('levels')
+        .update({ display_order: target.display_order, updated_at: new Date().toISOString() }).eq('id', current.id)
+      if (first.error) throw first.error
+      const second = await supabase.from('levels')
+        .update({ display_order: current.display_order, updated_at: new Date().toISOString() }).eq('id', target.id)
+      if (second.error) throw second.error
+      setLevels(prev => prev.map(l => l.id === current.id ? { ...l, display_order: target.display_order } : l.id === target.id ? { ...l, display_order: current.display_order } : l)
+        .sort((a, b) => a.display_order - b.display_order))
       addToast('success', 'Order updated.')
     } catch (err) {
-      console.error('Reorder error:', err)
-      setLevels(previousLevels)
-      addToast('error', 'Failed to save new order.')
+      addToast('error', err instanceof Error ? err.message : 'Reorder failed. Refresh to verify the saved order.')
+      await fetchData()
     }
   }
 
-  // Toggle Category Tag on a Level with local persistence
+  // Link changes are applied locally only after the database confirms them.
   async function handleToggleCategory(levelId: string, categoryId: string) {
-    const currentCats = levelCategoryMap[levelId] || []
-    const isAssigned = currentCats.includes(categoryId)
-    const nextCats = isAssigned
-      ? currentCats.filter((id) => id !== categoryId)
-      : [...currentCats, categoryId]
-
-    const nextMap = { ...levelCategoryMap, [levelId]: nextCats }
-    setLevelCategoryMap(nextMap)
-
+    const current = levelCategoryMap[levelId] || []
+    const assigned = current.includes(categoryId)
     try {
-      if (isAssigned) {
-        await supabase
-          .from('level_categories')
-          .delete()
-          .eq('level_id', levelId)
-          .eq('category_id', categoryId)
-      } else {
-        await supabase
-          .from('level_categories')
-          .insert({ level_id: levelId, category_id: categoryId })
-      }
-    } catch {}
+      const result = assigned
+        ? await supabase.from('level_categories').delete().eq('level_id', levelId).eq('category_id', categoryId)
+        : await supabase.from('level_categories').insert({ level_id: levelId, category_id: categoryId })
+      if (result.error) throw result.error
+      setLevelCategoryMap(prev => {
+        const existing = prev[levelId] || []
+        return { ...prev, [levelId]: assigned ? existing.filter(id => id !== categoryId) : [...new Set([...existing, categoryId])] }
+      })
+    } catch (err) {
+      addToast('error', err instanceof Error ? err.message : 'Could not update curriculum link.')
+    }
   }
 
-  // Toggle Course link for Level
   async function toggleCourseForLevel(levelId: string, courseId: string, assigned: boolean) {
-    let nextList: string[] = []
-    if (assigned) {
-      nextList = (levelCourseMap[levelId] || []).filter((id) => id !== courseId)
-      try {
-        await supabase
-          .from('level_courses')
-          .delete()
-          .eq('level_id', levelId)
-          .eq('course_id', courseId)
-      } catch {}
-    } else {
-      nextList = [...(levelCourseMap[levelId] || []), courseId]
-      try {
-        await supabase.from('level_courses').insert({ level_id: levelId, course_id: courseId })
-      } catch {}
+    try {
+      const result = assigned
+        ? await supabase.from('level_courses').delete().eq('level_id', levelId).eq('course_id', courseId)
+        : await supabase.from('level_courses').insert({ level_id: levelId, course_id: courseId })
+      if (result.error) throw result.error
+      setLevelCourseMap(prev => {
+        const existing = prev[levelId] || []
+        return { ...prev, [levelId]: assigned ? existing.filter(id => id !== courseId) : [...new Set([...existing, courseId])] }
+      })
+    } catch (err) {
+      addToast('error', err instanceof Error ? err.message : 'Could not update course recommendation.')
     }
-    const nextCourseMap = {
-      ...levelCourseMap,
-      [levelId]: nextList,
-    }
-    setLevelCourseMap(nextCourseMap)
   }
 
   // Course Catalog functions
@@ -572,35 +535,44 @@ export default function LevelsCoursesPage() {
   }
 
   async function deleteCourse(courseId: string) {
-    const updated = courses.filter((c) => c.id !== courseId)
-    setCourses(updated)
-    addToast('success', 'Course removed.')
+    const course = courses.find(c => c.id === courseId)
+    if (!course) return
+    const links = Object.values(levelCourseMap).filter(ids => ids.includes(courseId)).length
+    if (links > 0) {
+      addToast('error', `This course is linked to ${links} performance level(s). Unlink it before deleting.`)
+      return
+    }
+    if (!window.confirm(`Delete course "${course.name}"? This cannot be undone.`)) return
     try {
-      await supabase.from('courses').delete().eq('id', courseId)
-    } catch {}
+      const { error } = await supabase.from('courses').delete().eq('id', courseId)
+      if (error) throw error
+      setCourses(prev => prev.filter(c => c.id !== courseId))
+      addToast('success', 'Course deleted.')
+    } catch (err) {
+      addToast('error', err instanceof Error ? err.message : 'Could not delete course.')
+    }
   }
 
-  const activeLevels = levels.filter((l) => showArchived || l.is_active)
+  const activeLevels = levels
+    .filter(l => (showArchived || l.is_active) &&
+      [l.name, l.description || '', l.recommendation || ''].join(' ').toLowerCase().includes(levelSearch.trim().toLowerCase()))
+    .sort((a, b) => a.display_order - b.display_order)
+  const filteredCourses = courses.filter(c =>
+    [c.name, c.description || ''].join(' ').toLowerCase().includes(courseSearch.trim().toLowerCase()))
+  const activeLevelCount = levels.filter(l => l.is_active).length
+  const linkedCourseCount = new Set(Object.values(levelCourseMap).flat()).size
+  const linkedCategoryCount = new Set(Object.values(levelCategoryMap).flat()).size
+  const canReorder = !showArchived && !levelSearch.trim() && levels.every(l => l.is_active)
 
   return (
     <AdminLayout
-      title="Performance Tiers & Taxonomy Categories"
-      subtitle="Manage score bands, attach curriculum categories, and assign course recommendations"
+      title="Levels & Courses"
+      subtitle="Performance bands, curriculum links, and learning recommendations"
       actions={
-        <div className="flex items-center gap-2">
-          <button
-            onClick={openCreateLevelModal}
-            className="rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white shadow-xs hover:bg-blue-700 transition"
-          >
-            + Add Performance Level
-          </button>
-          <button
-            onClick={openCreateCourseModal}
-            className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
-          >
-            + Add Course Offering
-          </button>
-        </div>
+        <button type="button" onClick={() => void fetchData()}
+          className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+          Refresh data
+        </button>
       }
     >
       {/* Toast notifications */}
@@ -619,45 +591,48 @@ export default function LevelsCoursesPage() {
         ))}
       </div>
 
-      <div className="space-y-8 max-w-5xl">
-        {/* Section 1: Levels & Category Linkage */}
+      <div className="mx-auto max-w-7xl space-y-6 pb-12">
+        <LevelsCoursesHero onCreateLevel={openCreateLevelModal} onCreateCourse={openCreateCourseModal} />
+        <LevelsCoursesStats items={[
+          { label: 'Active performance levels', value: activeLevelCount, hint: 'Score bands currently available' },
+          { label: 'Courses', value: courses.length, hint: 'Saved learning offerings' },
+          { label: 'Linked categories', value: linkedCategoryCount, hint: 'Distinct categories across levels' },
+          { label: 'Recommended courses', value: linkedCourseCount, hint: 'Distinct courses linked to levels' },
+        ]} />
+        <LevelsCoursesTabs view={view} onChange={setView} levelCount={activeLevelCount} courseCount={courses.length} />
+        {loadError && (
+          <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+            <span>Could not load all data: {loadError}</span>
+            <button type="button" onClick={() => void fetchData()} className="rounded-lg border border-rose-200 bg-white px-3 py-1.5 font-semibold">Try again</button>
+          </div>
+        )}
+        {view === 'levels' && (
         <section className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-base font-bold text-slate-900">
-                Performance Tiers & Category Linkage
-              </h2>
-              <p className="text-xs text-slate-500">
-                Configure evaluation thresholds, associate curriculum categories via{' '}
-                <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[11px]">
-                  level_categories
-                </code>
-                , and arrange display order.
-              </p>
+              <h2 className="text-lg font-bold text-slate-900">Performance levels</h2>
+              <p className="mt-1 text-sm text-slate-500">Set score ranges and choose which curriculum topics and courses belong to each level.</p>
             </div>
-
-            <label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={showArchived}
-                onChange={(e) => setShowArchived(e.target.checked)}
-                className="rounded text-blue-600 focus:ring-blue-500"
-              />
-              Show deactivated tiers
-            </label>
+            <button type="button" onClick={openCreateLevelModal} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">+ Add level</button>
           </div>
-
+          <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-white p-4">
+            <input aria-label="Search performance levels" value={levelSearch} onChange={e => setLevelSearch(e.target.value)}
+              placeholder="Search levels and recommendations..."
+              className="min-w-[180px] flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-blue-500" />
+            <label className="inline-flex items-center gap-2 text-sm font-medium text-slate-600">
+              <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} className="rounded text-blue-600" />
+              Include deactivated
+            </label>
+            <span className="text-xs text-slate-500">{activeLevels.length} shown</span>
+          </div>
           {loading ? (
             <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-xs text-slate-500">
-              Loading tiers and taxonomy associations…
+              Loading performance levels…
             </div>
           ) : activeLevels.length === 0 ? (
-            <div className="rounded-2xl border-2 border-dashed border-slate-200 bg-white p-8 text-center text-slate-500">
-              <p className="text-sm font-semibold">No performance levels found.</p>
-              <p className="mt-1 text-xs text-slate-400">
-                Click "+ Add Performance Level" above to set up your first readiness band.
-              </p>
-            </div>
+            <LevelsCoursesEmpty title={levelSearch ? 'No matching levels' : 'No performance levels yet'}
+              description={levelSearch ? 'Try a different search term or include deactivated levels.' : 'Create a performance level to define how student scores translate into guidance.'}
+              action={!levelSearch ? <button type="button" onClick={openCreateLevelModal} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Create a level</button> : undefined} />
           ) : (
             <div className="space-y-3.5">
               {activeLevels.map((lvl, index) => {
@@ -677,8 +652,8 @@ export default function LevelsCoursesPage() {
                         <div className="flex flex-col gap-0.5">
                           <button
                             type="button"
-                            onClick={() => handleMoveLevel(index, 'up')}
-                            disabled={index === 0}
+                            onClick={() => handleMoveLevel(lvl.id, 'up')}
+                            disabled={!canReorder || index === 0}
                             title="Move up"
                             className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-20"
                           >
@@ -686,8 +661,8 @@ export default function LevelsCoursesPage() {
                           </button>
                           <button
                             type="button"
-                            onClick={() => handleMoveLevel(index, 'down')}
-                            disabled={index === activeLevels.length - 1}
+                            onClick={() => handleMoveLevel(lvl.id, 'down')}
+                            disabled={!canReorder || index === activeLevels.length - 1}
                             title="Move down"
                             className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-20"
                           >
@@ -748,6 +723,10 @@ export default function LevelsCoursesPage() {
                       </div>
                     )}
 
+                    <details className="group mt-4 rounded-xl border border-slate-200 bg-slate-50/50 p-3">
+                      <summary className="cursor-pointer select-none text-sm font-semibold text-blue-700">
+                        Manage curriculum & course links <span className="ml-2 text-xs font-normal text-slate-500">{assignedCategoryIds.length} categories · {assignedCourseIds.length} courses</span>
+                      </summary>
                     {/* Linked Taxonomy Categories (level_categories join table) */}
                     <div className="mt-4 pt-3 border-t border-slate-100">
                       <div className="flex items-center justify-between mb-2">
@@ -815,29 +794,36 @@ export default function LevelsCoursesPage() {
                         </div>
                       )}
                     </div>
+                    </details>
                   </div>
                 )
               })}
             </div>
           )}
         </section>
+        )}
 
-        {/* Section 2: Manage Course Inventory */}
+        {view === 'courses' && (
         <section className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
-          <div>
-            <h2 className="text-base font-bold text-slate-900">Course & Prep Program Catalog</h2>
-            <p className="text-xs text-slate-500">
-              Manage your offerings, enrollment links, and contact channels.
-            </p>
-          </div>
-
-          {courses.length === 0 ? (
-            <div className="border-2 border-dashed border-slate-200 rounded-xl p-8 text-center text-xs text-slate-400">
-              No courses in your catalog yet. Click "+ Add Course Offering" above to create one.
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">Courses & programs</h2>
+              <p className="mt-1 text-sm text-slate-500">Manage course descriptions, registration links and contact options.</p>
             </div>
+            <button type="button" onClick={openCreateCourseModal} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">+ Add course</button>
+          </div>
+          <input aria-label="Search courses" value={courseSearch} onChange={e => setCourseSearch(e.target.value)}
+            placeholder="Search courses and descriptions..."
+            className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-900 outline-none focus:border-blue-500" />
+          {loading ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-8 text-center text-sm text-slate-500">Loading courses…</div>
+          ) : filteredCourses.length === 0 ? (
+            <LevelsCoursesEmpty title={courseSearch ? 'No matching courses' : 'No courses yet'}
+              description={courseSearch ? 'Try another course name or description.' : 'Add a course so it can be recommended to students based on their performance level.'}
+              action={!courseSearch ? <button type="button" onClick={openCreateCourseModal} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white">Create a course</button> : undefined} />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-              {courses.map((c) => (
+              {filteredCourses.map((c) => (
                 <div
                   key={c.id}
                   className="border border-slate-200 rounded-xl p-4 bg-slate-50/50 flex flex-col justify-between space-y-3 min-w-0"
@@ -880,6 +866,7 @@ export default function LevelsCoursesPage() {
             </div>
           )}
         </section>
+        )}
       </div>
 
       {/* Modal: Create or Edit Level (react-hook-form + zod) */}
@@ -905,7 +892,7 @@ export default function LevelsCoursesPage() {
                   type="text"
                   placeholder="e.g. Advanced Mastery, Foundation"
                   {...register('name')}
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
+                  className="w-full text-sm border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
                 />
                 {errors.name && (
                   <p className="text-xs text-rose-600 mt-1">{errors.name.message}</p>
@@ -923,7 +910,7 @@ export default function LevelsCoursesPage() {
                     min="0"
                     max="100"
                     {...register('min_percentage')}
-                    className="w-full text-xs border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
+                    className="w-full text-sm border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
                   />
                   {errors.min_percentage && (
                     <p className="text-xs text-rose-600 mt-1">{errors.min_percentage.message}</p>
@@ -939,7 +926,7 @@ export default function LevelsCoursesPage() {
                     min="0"
                     max="100"
                     {...register('max_percentage')}
-                    className="w-full text-xs border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
+                    className="w-full text-sm border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
                   />
                   {errors.max_percentage && (
                     <p className="text-xs text-rose-600 mt-1">{errors.max_percentage.message}</p>
@@ -956,7 +943,7 @@ export default function LevelsCoursesPage() {
                   type="text"
                   placeholder="Short explanation displayed on the student report..."
                   {...register('description')}
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
+                  className="w-full text-sm border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
                 />
                 {errors.description && (
                   <p className="text-xs text-rose-600 mt-1">{errors.description.message}</p>
@@ -972,7 +959,7 @@ export default function LevelsCoursesPage() {
                   rows={2}
                   placeholder="Guidance or curriculum recommendations for students reaching this tier..."
                   {...register('recommendation')}
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
+                  className="w-full text-sm border border-slate-300 rounded-xl px-3.5 py-2.5 focus:border-blue-500 focus:outline-none"
                 />
                 {errors.recommendation && (
                   <p className="text-xs text-rose-600 mt-1">{errors.recommendation.message}</p>
@@ -1002,7 +989,7 @@ export default function LevelsCoursesPage() {
                             const next = isChecked
                               ? selectedCategoryIds.filter((id: string) => id !== c.id)
                               : [...selectedCategoryIds, c.id]
-                            setValue('category_ids', next, { shouldValidate: true })
+                            setValue('category_ids', next, { shouldValidate: true, shouldDirty: true })
                           }}
                           className={`rounded-full px-2.5 py-1 text-xs font-medium transition flex items-center gap-1 ${
                             isChecked
@@ -1044,7 +1031,7 @@ export default function LevelsCoursesPage() {
       {/* Course Modal */}
       {showCourseModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-md w-full space-y-4 shadow-xl border border-slate-200">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto space-y-4 shadow-xl border border-slate-200">
             <h3 className="text-base font-bold text-slate-900">
               {editingCourse ? 'Edit Course Offering' : 'New Prep Course'}
             </h3>
@@ -1060,7 +1047,7 @@ export default function LevelsCoursesPage() {
                   placeholder="e.g. SAT Math Advanced Bootcamp"
                   value={courseName}
                   onChange={(e) => setCourseName(e.target.value)}
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2"
+                  className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
                 />
               </div>
 
@@ -1073,7 +1060,7 @@ export default function LevelsCoursesPage() {
                   placeholder="Summary of what the student will learn..."
                   value={courseDescription}
                   onChange={(e) => setCourseDescription(e.target.value)}
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2"
+                  className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
                 />
               </div>
 
@@ -1086,7 +1073,7 @@ export default function LevelsCoursesPage() {
                   placeholder="https://..."
                   value={courseRegUrl}
                   onChange={(e) => setCourseRegUrl(e.target.value)}
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2"
+                  className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
                 />
               </div>
 
@@ -1099,7 +1086,7 @@ export default function LevelsCoursesPage() {
                   placeholder="https://wa.me/..."
                   value={courseWhatsappUrl}
                   onChange={(e) => setCourseWhatsappUrl(e.target.value)}
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2"
+                  className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
                 />
               </div>
 

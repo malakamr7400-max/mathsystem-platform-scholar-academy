@@ -1,0 +1,15 @@
+/* Scoped to the question authoring form; does not change other admin pages. */
+.question-editor-form label { font-size: .875rem; line-height: 1.45; }
+.question-editor-form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.question-editor-form select,
+.question-editor-form textarea { font-size: .875rem; line-height: 1.5; }
+.question-editor-form input::placeholder,
+.question-editor-form textarea::placeholder { color: #94a3b8; }
+.question-editor-form input:focus-visible,
+.question-editor-form select:focus-visible,
+.question-editor-form textarea:focus-visible { outline: 2px solid #bfdbfe; outline-offset: 1px; }
+.question-editor-form > [id^="question-editor-"] { scroll-margin-top: 6rem; }
+.question-editor-form > [id^="question-editor-"] > div:first-child > h3 { font-size: .875rem; line-height: 1.45; letter-spacing: .025em; text-transform: none; }
+@media (max-width: 640px) {
+  .question-editor-form { padding: 1rem; }
+}

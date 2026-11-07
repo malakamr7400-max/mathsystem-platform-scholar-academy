@@ -9,13 +9,13 @@
   --color-primary-200: #bfdbfe;
   --color-primary-300: #93c5fd;
   --color-primary-400: #60a5fa;
-  --color-primary-500: #3b82f6;
-  --color-primary-600: #2563eb;
+  --color-primary-500: #2563eb;
+  --color-primary-600: #1d4ed8;
   --color-primary-700: #1d4ed8;
   --color-primary-800: #1e40af;
   --color-primary-900: #1e3a8a;
 
-  --color-neutral-50: #f8fafc;
+  --color-neutral-50: #f4f7fb;
   --color-neutral-100: #f1f5f9;
   --color-neutral-200: #e2e8f0;
   --color-neutral-300: #cbd5e1;
@@ -24,7 +24,7 @@
   --color-neutral-600: #475569;
   --color-neutral-700: #334155;
   --color-neutral-800: #1e293b;
-  --color-neutral-900: #0f172a;
+  --color-neutral-900: #0f2747;
 
   --color-success-50: #ecfdf5;
   --color-success-100: #d1fae5;
@@ -53,13 +53,13 @@
   --color-primary-200: #bfdbfe;
   --color-primary-300: #93c5fd;
   --color-primary-400: #60a5fa;
-  --color-primary-500: #3b82f6;
-  --color-primary-600: #2563eb;
+  --color-primary-500: #2563eb;
+  --color-primary-600: #1d4ed8;
   --color-primary-700: #1d4ed8;
   --color-primary-800: #1e40af;
   --color-primary-900: #1e3a8a;
 
-  --color-neutral-50: #f8fafc;
+  --color-neutral-50: #f4f7fb;
   --color-neutral-100: #f1f5f9;
   --color-neutral-200: #e2e8f0;
   --color-neutral-300: #cbd5e1;
@@ -68,7 +68,7 @@
   --color-neutral-600: #475569;
   --color-neutral-700: #334155;
   --color-neutral-800: #1e293b;
-  --color-neutral-900: #0f172a;
+  --color-neutral-900: #0f2747;
 
   --color-success-50: #ecfdf5;
   --color-success-100: #d1fae5;
@@ -84,6 +84,14 @@
   --color-danger-100: #fee2e2;
   --color-danger-600: #dc2626;
   --color-danger-700: #b91c1c;
+
+  --ms-navy: #0f2747;
+  --ms-blue: #1d4ed8;
+  --ms-teal: #0d9488;
+  --ms-canvas: #f4f7fb;
+  --ms-border: #dce5f1;
+  --ms-radius: 18px;
+  --ms-shadow: 0 8px 32px rgb(15 39 71 / 0.055), 0 1px 3px rgb(15 39 71 / 0.04);
 
   font-family: var(--font-sans);
   line-height: 1.5;
@@ -104,7 +112,7 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: linear-gradient(180deg, var(--color-neutral-50, #f8fafc), #ffffff 30%, var(--color-neutral-50, #f8fafc));
+  background: linear-gradient(180deg, #f4f7fb, #ffffff 42%, #f4f7fb);
   color: var(--color-neutral-800, #1e293b);
 }
 
@@ -224,3 +232,448 @@ img, svg, video, canvas {
   max-width: 100%;
 }
 
+
+/* Step 60.1: shared visual foundation. Scoped to new UI surfaces to avoid
+   changing report/PDF rendering or assessment behavior. */
+.ms-admin-shell { background: #f4f7fb; }
+.ms-admin-sidebar { border-color: var(--ms-border); box-shadow: 3px 0 20px rgb(15 39 71 / .025); }
+.ms-admin-header { border-color: var(--ms-border); }
+.ms-workspace-main { width: 100%; }
+.ms-card { background: #fff; border: 1px solid var(--ms-border); border-radius: var(--ms-radius); box-shadow: var(--ms-shadow); }
+.ms-eyebrow { font-size: .72rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; color: #1d4ed8; }
+.ms-muted { color: #52647e; }
+.ms-gradient-hero { background: linear-gradient(125deg, #0f2747 0%, #173c68 65%, #1b5579 100%); }
+.ms-student-shell { background: radial-gradient(circle at 10% 0%, #e5f0ff 0, transparent 35%), #f4f7fb; }
+.ms-student-card { border-color: #dce5f1; box-shadow: var(--ms-shadow); }
+.ms-login-shell { min-height: 100vh; background: #f4f7fb; }
+.ms-login-panel { background: linear-gradient(150deg, #0f2747 0%, #174274 68%, #0d777a 145%); }
+.ms-login-input { width: 100%; min-height: 48px; border: 1px solid #cad7e6; border-radius: 12px; background: white; padding: 0 14px; font-size: .93rem; color: #0f2747; transition: border-color .15s ease, box-shadow .15s ease; }
+.ms-login-input:focus-visible { border-color: #1d4ed8; }
+.ms-login-input::placeholder { color: #8492a6; }
+.ms-login-submit { min-height: 48px; width: 100%; border-radius: 12px; background: #1d4ed8; color: #fff; font-weight: 700; transition: background-color .15s ease, transform .15s ease; }
+.ms-login-submit:hover:not(:disabled) { background: #1e40af; }
+.ms-login-submit:disabled { cursor: wait; opacity: .6; }
+.ms-guide { border: 1px solid #b8e4df; border-radius: 16px; background: #f0faf8; color: #174c4b; }
+.ms-guide-number { display: inline-grid; place-items: center; width: 26px; height: 26px; flex: 0 0 26px; border-radius: 50%; background: #c9ebe6; color: #075b55; font-size: .75rem; font-weight: 800; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .ms-login-submit, .ms-login-input { transition: none; }
+}
+@media print {
+  .ms-student-shell { background: white !important; }
+  .ms-card, .ms-student-card { box-shadow: none !important; }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Step 60.2 — MathSystem / refined educator workspace
+   Presentation-only. The student report/PDF renderers and all data flows are
+   deliberately outside the scope of these rules.
+   ────────────────────────────────────────────────────────────────────────── */
+:root {
+  --ms-ink: #15283f;
+  --ms-ink-deep: #102136;
+  --ms-sea: #54867d;
+  --ms-sea-soft: #eaf4f0;
+  --ms-paper: #f7f9f8;
+  --ms-line: #e3eae9;
+  --ms-card-shadow: 0 8px 28px rgba(21, 40, 63, 0.035), 0 1px 2px rgba(21, 40, 63, 0.035);
+}
+
+.ms-admin-shell {
+  background: var(--ms-paper);
+  background-image: radial-gradient(ellipse 65% 40% at 85% 0%, rgba(215, 234, 229, 0.24), transparent 80%);
+}
+.ms-admin-sidebar {
+  background: var(--ms-ink-deep);
+  color: #e9f1f4;
+  border-color: rgba(255,255,255,.08);
+  box-shadow: 6px 0 30px rgba(16,33,54,.055);
+}
+.ms-sidebar-brand, .ms-sidebar-mobile-head { border-color: rgba(255,255,255,.095); }
+.ms-sidebar-logo {
+  background: linear-gradient(145deg, #6b9f97, #3c716f);
+  box-shadow: 0 5px 16px rgba(0,0,0,.12), inset 0 1px rgba(255,255,255,.16);
+}
+.ms-sidebar-brand-caption { color: #a7bbc9; letter-spacing: .025em; }
+.ms-sidebar-section { color: #839bae; }
+.ms-sidebar-link { color: #b9c9d5; }
+.ms-sidebar-link:hover { color: #fff; background: rgba(255,255,255,.07); }
+.ms-sidebar-link svg { color: #91aabd; }
+.ms-sidebar-link:hover svg { color: #e7f5f1; }
+.ms-sidebar-link-active,
+.ms-sidebar-link-active:hover {
+  color: #fff;
+  background: rgba(104,157,148,.20);
+  box-shadow: inset 3px 0 0 #8bbcb0;
+}
+.ms-sidebar-link-active svg { color: #a8d4c7; }
+.ms-active-marker { background: #a8d4c7; }
+.ms-sidebar-account { border-color: rgba(255,255,255,.09); }
+.ms-sidebar-account-inner { background: rgba(255,255,255,.06); }
+.ms-sidebar-avatar { background: rgba(137,194,181,.2); color: #c9f0e6; }
+.ms-sidebar-role { color: #9cb4c3; }
+.ms-sidebar-signout { color: #b6c9d4; }
+.ms-sidebar-signout:hover { background: rgba(255,255,255,.09); color: white; }
+.ms-admin-header { border-color: var(--ms-line); box-shadow: 0 1px 0 rgba(20,43,58,.015); }
+.ms-workspace-main { position: relative; }
+.ms-admin-shell footer { border-color: var(--ms-line); color: #81919b; }
+
+.ms-admin-shell .ms-eyebrow { color: #477d76; font-size: .68rem; font-weight: 750; letter-spacing: .16em; }
+.ms-admin-shell .ms-eyebrow > span { background: #54867d; }
+.ms-admin-shell .ms-gradient-hero {
+  background: linear-gradient(112deg, #152a42 0%, #1c3c51 63%, #285b60 100%);
+}
+.ms-dashboard-hero {
+  border: 1px solid rgba(27,66,75,.14);
+  box-shadow: 0 15px 36px rgba(22,47,66,.09);
+}
+.ms-dashboard-hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: .16;
+  background-image: linear-gradient(90deg, rgba(255,255,255,.11) 1px, transparent 1px), linear-gradient(rgba(255,255,255,.11) 1px, transparent 1px);
+  background-size: 42px 42px;
+  mask-image: linear-gradient(90deg, transparent 25%, black 100%);
+}
+.ms-dashboard-hero > div { z-index: 1; }
+.ms-dashboard-hero .ms-hero-heading { white-space: pre-line; color: #fff; }
+.ms-hero-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 17px 19px;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 18px;
+  background: rgba(255,255,255,.08);
+  backdrop-filter: blur(8px);
+}
+.ms-hero-steps-heading { color: #b8d4d4; font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 6px; }
+.ms-hero-step { display: flex; align-items: center; gap: 12px; padding: 10px 4px; border-radius: 8px; color: #f6fbfb; font-size: 12px; font-weight: 600; }
+.ms-hero-step + .ms-hero-step { border-top: 1px solid rgba(255,255,255,.10); }
+.ms-hero-step > span:first-child { color: #9ccac0; font-size: 11px; font-variant-numeric: tabular-nums; }
+.ms-hero-step > span:nth-child(2) { flex: 1; }
+.ms-hero-step svg { color: #a6d4c7; transition: transform .2s ease; }
+.ms-hero-step:hover { color: white; background: rgba(255,255,255,.08); }
+.ms-hero-step:hover svg { transform: translate(2px,-2px); }
+.ms-dashboard-metric,
+.ms-dashboard-section,
+.ms-quick-action,
+.ms-assessment-card,
+.ms-filter-card {
+  border-color: var(--ms-line);
+  box-shadow: var(--ms-card-shadow);
+}
+.ms-dashboard-metric { position: relative; overflow: hidden; }
+.ms-dashboard-metric::before { content: ''; position: absolute; top: 0; left: 20px; right: 20px; height: 2px; background: linear-gradient(90deg, #77aaa1, transparent); opacity: .65; }
+.ms-dashboard-metric:hover, .ms-quick-action:hover, .ms-assessment-card:hover { border-color: #c7dcd7; box-shadow: 0 13px 32px rgba(21,40,63,.065); }
+.ms-quick-action:hover { transform: translateY(-2px); }
+.ms-section-intro {
+  border-color: #d9e7e3;
+  background: linear-gradient(108deg, #f0f6f3 0%, #f9fbfa 65%, #fff 100%);
+}
+.ms-section-intro h2 { letter-spacing: -.035em; }
+.ms-filter-card:hover { border-color: #bdd4ce; }
+.ms-filter-card-active {
+  background: #eaf4f0;
+  border-color: #91beb2;
+  box-shadow: 0 0 0 1px rgba(84,134,125,.14);
+}
+.ms-library-hero { border-color: #214c56; }
+.ms-admin-shell button.bg-blue-600,
+.ms-admin-shell a.bg-blue-600,
+.ms-admin-shell .btn-primary {
+  background-color: #285b70 !important;
+  color: #fff !important;
+}
+.ms-admin-shell button.bg-blue-600:hover,
+.ms-admin-shell a.bg-blue-600:hover,
+.ms-admin-shell .btn-primary:hover { background-color: #1c485d !important; }
+.ms-admin-shell a.text-blue-700:hover { color: #244e65; }
+.ms-admin-shell input:not([type='checkbox']):not([type='radio']),
+.ms-admin-shell select,
+.ms-admin-shell textarea { accent-color: #467f77; }
+.ms-admin-shell input:focus-visible,
+.ms-admin-shell select:focus-visible,
+.ms-admin-shell textarea:focus-visible { outline-color: #63998e; }
+.ms-login-shell { background: radial-gradient(ellipse 55% 60% at 5% 0%, #e7f1ed, transparent 80%), #f7f9f8; }
+.ms-login-panel { background: linear-gradient(150deg, #14293f, #1e4655 75%, #306e6c 130%); }
+.ms-login-submit { background: #285b70; }
+.ms-login-submit:hover:not(:disabled) { background: #1d485e; }
+.ms-login-input { border-color: #d5e2df; }
+.ms-login-input:focus-visible { border-color: #5b978b; }
+
+@media (max-width: 640px) {
+  .ms-hero-steps { padding: 14px 15px; }
+  .ms-dashboard-hero { border-radius: 20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ms-hero-step svg, .ms-quick-action { transition: none; }
+  .ms-quick-action:hover { transform: none; }
+}
+@media print {
+  .ms-admin-shell { background: #fff !important; background-image: none !important; }
+  .ms-dashboard-hero::after { display: none; }
+}
+
+.ms-skip-link {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 100;
+  padding: 10px 15px;
+  border-radius: 10px;
+  background: #fff;
+  color: #173c4d;
+  border: 2px solid #5a978b;
+  box-shadow: 0 8px 20px rgba(0,0,0,.1);
+  transform: translateY(-180%);
+}
+.ms-skip-link:focus { transform: translateY(0); }
+.ms-admin-shell button.bg-primary-600,
+.ms-admin-shell a.bg-primary-600 { background-color: #285b70 !important; color: #fff !important; }
+.ms-admin-shell button.bg-primary-600:hover,
+.ms-admin-shell a.bg-primary-600:hover { background-color: #1c485d !important; }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Step 60.3 — Student experience / refined educational design.
+   Scoped styles: do not affect report/PDF layout or server scoring.
+   ────────────────────────────────────────────────────────────────────────── */
+.ms-student-shell {
+  color: #15283f;
+  background: radial-gradient(ellipse 60% 26% at 6% 0%, rgba(215, 235, 229, .68), transparent 80%),
+              radial-gradient(ellipse 50% 26% at 96% 2%, rgba(222, 233, 240, .56), transparent 78%),
+              #f7f9f8;
+}
+.ms-student-topbar, .ms-student-player-header { color: #15283f; }
+.ms-student-topbar p + p { color: #70828c; }
+.ms-student-mark {
+  display: inline-grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  place-items: center;
+  color: #e5f5f0;
+  border: 1px solid #244a4e;
+  border-radius: 13px;
+  background: linear-gradient(145deg, #15283f, #285e63);
+  box-shadow: 0 6px 16px rgba(21,40,63,.10);
+}
+.ms-student-topbar-note { display: inline-flex; align-items: center; gap: 7px; color: #526b71; font-size: 12px; font-weight: 600; }
+.ms-student-card, .ms-student-question-card, .ms-student-progress {
+  background: #fff;
+  border-color: #e0e9e7;
+  box-shadow: 0 15px 40px rgba(21,40,63,.04), 0 2px 5px rgba(21,40,63,.025);
+}
+.ms-student-overview { position: relative; overflow: hidden; }
+.ms-student-overview::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  background: linear-gradient(90deg, #214456, #54867d 62%, #b6d8cd);
+}
+.ms-student-eyebrow { color: #477d76; font-size: 11px; font-weight: 800; letter-spacing: .16em; }
+.ms-student-title { color: #15283f; letter-spacing: -.035em; overflow-wrap: anywhere; }
+.ms-student-facts > div { display: flex; flex-direction: column; gap: 6px; padding: 15px 17px; border-radius: 15px; border: 1px solid #e2ece9; background: #f7faf9; }
+.ms-student-facts span { color: #627982; font-weight: 600; }
+.ms-student-facts strong { color: #15283f; font-size: 19px; line-height: 1.3; font-weight: 750; }
+.ms-student-shell .ms-guide { border-color: #d1e5df; background: #f0f7f4; color: #214d4b; }
+.ms-student-shell .ms-guide-number { background: #d2e9e1; color: #205f55; }
+.ms-student-section { border-color: #e1e9e7; transition: border-color .15s ease, box-shadow .15s ease; }
+.ms-student-section:hover { border-color: #b5d1c7; box-shadow: 0 7px 20px rgba(21,40,63,.04); }
+.ms-student-instructions { border: 1px solid #e8e0cd; background: #fcfaf5; color: #594d34; }
+.ms-student-field { min-height: 46px; border-color: #cfdedb; color: #15283f; transition: border-color .15s ease, box-shadow .15s ease; }
+.ms-student-field:focus-visible { border-color: #54867d; box-shadow: 0 0 0 3px rgba(84,134,125,.17); }
+.ms-student-field[aria-invalid="true"] { border-color: #b44444; box-shadow: 0 0 0 2px rgba(180,68,68,.12); }
+.ms-student-mode { min-height: 145px; border-color: #dce7e3; }
+.ms-student-mode:hover { border-color: #9dbdb4; background-color: #f6faf8; }
+.ms-student-mode[aria-pressed="true"] { border-color: #54867d; background: #edf6f2; box-shadow: 0 0 0 2px rgba(84,134,125,.13); }
+.ms-student-primary { color: #fff !important; background: #1e5260 !important; box-shadow: 0 6px 15px rgba(21,60,72,.12); }
+.ms-student-primary:hover:not(:disabled) { background: #153f4b !important; }
+.ms-student-secondary { color: #264653; background: #fff; border-color: #cadbd7; }
+.ms-student-secondary:hover:not(:disabled) { background: #f0f7f4; border-color: #9dbdb4; }
+.ms-student-progress-fill { background: linear-gradient(90deg, #467c76, #71aa9b); }
+.ms-student-question-dot[aria-current="step"] { background: #1e5260; border-color: #1e5260; color: #fff; box-shadow: 0 0 0 3px rgba(84,134,125,.14); }
+.ms-student-question-text { line-height: 1.8; overflow-wrap: anywhere; }
+.ms-student-player .ms-student-question-card { position: relative; }
+.ms-student-player .ms-student-question-card::before { content: ''; position: absolute; top: 0; left: 25px; right: 25px; height: 2px; background: linear-gradient(90deg, #54867d, transparent); }
+.ms-student-shell button:focus-visible, .ms-student-shell a:focus-visible, .ms-student-shell input:focus-visible, .ms-student-shell select:focus-visible { outline: 3px solid rgba(84,134,125,.45); outline-offset: 3px; }
+@media (max-width: 640px) {
+  .ms-student-actions { align-items: stretch; }
+  .ms-student-actions > button:last-child { flex: 1; }
+  .ms-student-topbar-note { font-size: 11px; }
+  .ms-student-facts > div { padding: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ms-student-section, .ms-student-field, .ms-student-mode { transition: none; }
+}
+@media print {
+  .ms-student-shell { background: #fff !important; }
+  .ms-student-card, .ms-student-question-card, .ms-student-progress { box-shadow: none !important; }
+}
+.ms-student-choice { border-color: #dce7e3; line-height: 1.65; }
+.ms-student-choice:hover:not(:disabled) { border-color: #a6c7bd; background: #f6faf8; }
+.ms-student-choice[aria-pressed="true"], .ms-student-choice[aria-pressed="true"]:hover { border-color: #54867d; background: #eef7f3; }
+.ms-student-choice:focus-visible { box-shadow: 0 0 0 3px rgba(84,134,125,.2); }
+
+/* Step 60.4 — Student report design, scoped to the shared report renderer.
+   No grading, access-control, or saved-report behavior is affected. */
+.ms-report-shell {
+  --ms-report-navy: #15283f;
+  --ms-report-jade: #54867d;
+  --ms-report-line: #e3eae9;
+  background: #f7f9f8;
+  color: #243449;
+}
+.ms-report-shell .ms-report-toolbar {
+  border-bottom-color: var(--ms-report-line);
+  box-shadow: 0 1px 8px rgb(21 40 63 / 0.04);
+}
+.ms-report-shell .ms-report-toolbar h2 { color: var(--ms-report-navy); }
+.ms-report-shell .ms-report-toolbar button:first-child {
+  background: var(--ms-report-navy);
+  color: #fff;
+}
+.ms-report-shell .ms-report-toolbar button:first-child:hover { background: #28445e; }
+.ms-report-shell .ms-report-jump > div {
+  border-color: var(--ms-report-line);
+  border-radius: 16px;
+  box-shadow: 0 3px 14px rgb(21 40 63 / 0.035);
+}
+.ms-report-shell .ms-report-jump button:hover,
+.ms-report-shell .ms-report-jump button:focus-visible {
+  background: #eaf3f0;
+  color: #235a50;
+}
+.ms-report-shell .ms-report-content { padding-top: 1.75rem; padding-bottom: 3.5rem; }
+.ms-report-shell .ms-report-hero {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(123deg, #15283f 0%, #233e56 67%, #305f62 100%);
+  border: 1px solid rgb(255 255 255 / 0.08);
+  box-shadow: 0 18px 42px rgb(21 40 63 / 0.14);
+}
+.ms-report-shell .ms-report-hero::before {
+  content: '';
+  position: absolute;
+  top: -120px;
+  right: -110px;
+  width: 330px;
+  height: 330px;
+  border: 1px solid rgb(255 255 255 / 0.10);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.ms-report-shell .ms-report-hero::after {
+  content: '';
+  position: absolute;
+  top: -60px;
+  right: -50px;
+  width: 210px;
+  height: 210px;
+  border: 1px solid rgb(255 255 255 / 0.08);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.ms-report-shell .ms-report-hero > * { position: relative; z-index: 1; }
+.ms-report-shell .ms-report-hero h1,
+.ms-report-shell .ms-report-hero h2,
+.ms-report-shell .ms-report-hero h3 { color: #fff; }
+.ms-report-shell .ms-report-hero .grid > div {
+  background: rgb(255 255 255 / 0.10);
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 15px;
+  backdrop-filter: blur(6px);
+}
+.ms-report-shell .ms-report-score {
+  background: linear-gradient(125deg, #edf5f2, #fff 70%);
+  border-color: #d5e7e0;
+  box-shadow: 0 5px 24px rgb(21 40 63 / 0.035);
+}
+.ms-report-shell .ms-report-section-kicker {
+  font-size: 0.67rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  color: #47796f;
+}
+.ms-report-shell .ms-report-score-value {
+  color: #15283f;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+}
+.ms-report-shell .ms-report-panel,
+.ms-report-shell .ms-report-content > section:not(.ms-report-hero):not(.ms-report-score) {
+  border-color: var(--ms-report-line);
+  box-shadow: 0 4px 22px rgb(21 40 63 / 0.04);
+}
+.ms-report-shell .ms-report-content h2 { color: var(--ms-report-navy); }
+.ms-report-shell .ms-report-content button:focus-visible,
+.ms-report-shell .ms-report-toolbar button:focus-visible { outline: 2px solid #54867d; outline-offset: 3px; }
+@media (max-width: 640px) {
+  .ms-report-shell .ms-report-hero { border-radius: 20px; }
+  .ms-report-shell .ms-report-hero .grid { gap: 0.65rem; }
+  .ms-report-shell .ms-report-content { padding-top: 1rem; }
+}
+@media print {
+  .ms-report-shell { background: #fff !important; }
+  .ms-report-shell .ms-report-hero { box-shadow: none !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .ms-report-shell .ms-report-content > section { box-shadow: none !important; break-inside: avoid-page; }
+}
+
+/* Step 61.1: responsive teacher dashboard and accessible focus feedback */
+.ms-admin-shell :is(a, button):focus-visible { outline: 3px solid #70aa9c; outline-offset: 3px; }
+.ms-dashboard-metric { min-width: 0; }
+.ms-dashboard-welcome h1 { overflow-wrap: anywhere; }
+@media (max-width: 639px) {
+  .ms-dashboard-hero .ms-hero-heading { font-size: clamp(1.45rem, 6vw, 2rem); line-height: 1.2; }
+  .ms-hero-steps { padding: 12px 14px; }
+  .ms-dashboard-section { min-width: 0; overflow-wrap: anywhere; }
+  .ms-dashboard-welcome > div:last-child > :is(a, button) { justify-content: center; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ms-dashboard-metric, .ms-quick-action, .ms-hero-step svg { transition: none; }
+  .ms-quick-action:hover { transform: none; }
+}
+
+
+/* MathSystem Step 85 — accessible on-screen text contrast */
+/* Screen-only and scoped: does not modify printed student reports/PDF exports. */
+@media screen {
+  /* Shared readable defaults for light teacher/student workspaces. */
+  .ms-admin-shell, .ms-student-shell {
+    --ms-text-primary: #14263d;
+    --ms-text-secondary: #40546b;
+    --ms-text-muted: #475b71;
+  }
+  .ms-admin-shell .ms-muted,
+  .ms-student-shell .ms-muted { color: var(--ms-text-secondary); }
+  .ms-admin-shell .text-slate-400,
+  .ms-admin-shell .text-slate-500,
+  .ms-student-shell .text-slate-400,
+  .ms-student-shell .text-slate-500 { color: var(--ms-text-muted); }
+  .ms-admin-shell input::placeholder,
+  .ms-admin-shell textarea::placeholder,
+  .ms-student-shell input::placeholder,
+  .ms-student-shell textarea::placeholder { color: #52647a; opacity: 1; }
+
+  /* The taxonomy workspace uses a near-black hero; headings must be white.
+     Scoped to the hero so its light content cards remain unchanged. */
+  .ms-admin-shell .ms-taxonomy-contrast-hero,
+  .ms-taxonomy-contrast-hero { color: #f8fafc; }
+  .ms-taxonomy-contrast-hero :is(h1,h2,h3,h4),
+  .ms-taxonomy-contrast-hero .text-white { color: #fff; }
+  .ms-taxonomy-contrast-hero .text-slate-200 { color: #e2e8f0; }
+  .ms-taxonomy-contrast-hero .text-slate-300 { color: #cbd5e1; }
+  .ms-taxonomy-contrast-hero .text-slate-400,
+  .ms-taxonomy-contrast-hero .text-slate-500 { color: #d1ddeb; }
+
+  /* Other near-black utility panels can contain headings using globally
+     styled h1-h4. Do not override intentionally colored buttons/badges. */
+  .ms-admin-shell :is(.bg-slate-950,.bg-slate-900,.bg-neutral-900) > :is(h1,h2,h3,h4),
+  .ms-student-shell :is(.bg-slate-950,.bg-slate-900,.bg-neutral-900) > :is(h1,h2,h3,h4) {
+    color: #fff;
+  }
+}
+/* End MathSystem Step 85 */

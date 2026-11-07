@@ -237,6 +237,22 @@ export function computeTimeAnalysis(
     }
   }
 
+  // Older server report versions may set every question time to zero because
+  // per-question timing was never collected. Do not turn missing telemetry into
+  // a false 0-second pace or fastest/slowest ranking.
+  const hasRecordedQuestionTiming = questions.some(
+    (q) => Number.isFinite(Number(q.time_spent_seconds)) && Number(q.time_spent_seconds) > 0
+  )
+  if (!hasRecordedQuestionTiming) {
+    return {
+      overallAvgTime: 0,
+      slowThresholdPct,
+      categories: [],
+      quickestSolved: null,
+      slowestSolved: null,
+    }
+  }
+
   // Calculate actual overall average if not provided or 0
   const totalTimeAll = questions.reduce((acc, q) => acc + (q.time_spent_seconds || 0), 0)
   const effectiveOverallAvg =

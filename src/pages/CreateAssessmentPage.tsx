@@ -1,294 +1,488 @@
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import {
+  ArrowLeft,
+  ArrowRight,
+  BookOpen,
+  CheckCircle2,
+  Clock3,
+  FileText,
+  GraduationCap,
+  KeyRound,
+  Layers3,
+  LockKeyhole,
+  Save,
+  ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+} from 'lucide-react'
 import AdminLayout from '../components/AdminLayout'
+import { useUnsavedChanges } from '../contexts/UnsavedChangesContext'
 import {
   assessmentService,
   defaultAssessmentSettings,
   defaultSectionSettings,
+  type Assessment,
   type AssessmentSection,
 } from '../lib/assessmentService'
-import { questionBankService } from '../lib/questionBankService'
-import {
-  ArrowLeft,
-  Save,
-  Layers,
-  Clock,
-  Calculator,
-  ShieldAlert,
-} from 'lucide-react'
+
+import { scoringLabels, type ScoringScheme } from '../lib/scoringSchemes'
+
+type TimerMode = 'per_section' | 'per_assessment' | 'untimed'
+
+const DEFAULT_INSTRUCTIONS =
+  'Read each question carefully. Answer to the best of your ability and review your work before submitting.'
+
+const initialForm = {
+  scoringScheme: 'standard' as ScoringScheme,
+  title: '',
+  subtitle: '',
+  subject: 'Mathematics',
+  grade: 'Grade 10',
+  description: '',
+  instructions: DEFAULT_INSTRUCTIONS,
+  timerMode: 'per_section' as TimerMode,
+  overallMinutes: 60,
+  sectionMinutes: 45,
+  sectionTitle: 'Section 1: General Assessment',
+  calculatorAllowed: true,
+  attempts: 1,
+  passcodeEnabled: false,
+  passcode: '',
+}
+
+const fieldClass =
+  'w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50'
+
+const labelClass = 'mb-1.5 block text-xs font-bold text-slate-700'
 
 export const CreateAssessmentPage: React.FC = () => {
   const navigate = useNavigate()
-  const [title, setTitle] = useState('')
-  const [subtitle, setSubtitle] = useState('')
-  const [subject, setSubject] = useState('Mathematics')
-  const [grade, setGrade] = useState('Grade 10')
-  const [description, setDescription] = useState('')
-  const [instructions, setInstructions] = useState(
-    'Please complete each question thoughtfully. Check your answers before moving forward.'
-  )
-  const [timerMode, setTimerMode] = useState<'per_section' | 'per_assessment' | 'untimed'>('per_section')
-  const [attempts, setAttempts] = useState(1)
-  const [passcodeEnabled, setPasscodeEnabled] = useState(false)
-  const [passcode, setPasscode] = useState('1234')
+  const [form, setForm] = useState(initialForm)
   const [isPersisting, setIsPersisting] = useState(false)
+  const [operationError, setOperationError] = useState<string | null>(null)
+  const [persistStatus, setPersistStatus] = useState('')
+  const [editorDestination, setEditorDestination] = useState<string | null>(null)
 
-  const persistAssessment = () => {
-    if (!title.trim()) throw new Error('Enter an assessment title before saving.')
+  // Retain the same assessment ID on retry. A server write might have succeeded
+  // even when a subsequent read-back verification failed; never generate a new
+  // assessment in that situation.
+  const candidateIdRef = useRef<string | null>(null)
+  const savedAssessmentRef = useRef<Assessment | null>(null)
+  const savePromiseRef = useRef<Promise<Assessment> | null>(null)
 
-    const bankQuestions = questionBankService.getStoredQuestions()
-    const q1 = bankQuestions[0]
-    const q2 = bankQuestions[1]
-    const q3 = bankQuestions[2]
-    const q4 = bankQuestions[3]
+  const update = <K extends keyof typeof initialForm>(key: K, value: (typeof initialForm)[K]) => {
+    setForm((current) => ({ ...current, [key]: value }))
+    setOperationError(null)
+  }
 
-    const initialSections: AssessmentSection[] = [
-      {
-        id: `sec_${Date.now().toString(36)}_single`,
-        title: 'Section 1: General Assessment',
-        description: 'Comprehensive diagnostic evaluation',
-        displayOrder: 0,
-        settings: {
-          ...defaultSectionSettings,
-          timeLimitMinutes: 45,
-          calculatorAllowed: true,
-        },
-        questions: [
-          {
-            id: `sq_${Date.now().toString(36)}_1`,
-            questionId: q1?.id || 'default-1',
-            displayOrder: 0,
-            pointsOverride: 1,
-            required: true,
-            questionSnapshot: q1,
-          },
-          {
-            id: `sq_${Date.now().toString(36)}_2`,
-            questionId: q2?.id || 'default-2',
-            displayOrder: 1,
-            pointsOverride: 1,
-            required: true,
-            questionSnapshot: q2,
-          },
-        ],
+  const isDirty = useMemo(
+    () => JSON.stringify(form) !== JSON.stringify(initialForm),
+    [form]
+  )
+
+  const validation = useMemo(() => {
+    const issues: string[] = []
+    if (!form.title.trim()) issues.push('Add an assessment title')
+    if (!form.subject.trim()) issues.push('Add a subject')
+    if (!form.grade.trim()) issues.push('Add a grade or level')
+    if (!form.sectionTitle.trim()) issues.push('Name the first section')
+    if (form.timerMode === 'per_section' && (!Number.isInteger(form.sectionMinutes) || form.sectionMinutes < 1 || form.sectionMinutes > 300)) {
+      issues.push('Set the first section timer between 1 and 300 minutes')
+    }
+    if (form.timerMode === 'per_assessment' && (!Number.isInteger(form.overallMinutes) || form.overallMinutes < 1 || form.overallMinutes > 600)) {
+      issues.push('Set the assessment timer between 1 and 600 minutes')
+    }
+    if (form.passcodeEnabled && !form.passcode.trim()) issues.push('Enter an access code')
+    return issues
+  }, [form])
+
+  const buildDraft = (): Assessment => {
+    if (validation.length > 0) throw new Error(validation.join('. ') + '.')
+
+    const initialSection: AssessmentSection = {
+      id: `sec_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`,
+      title: form.sectionTitle.trim(),
+      description: '',
+      displayOrder: 0,
+      settings: {
+        ...defaultSectionSettings,
+        timingEnabled: form.timerMode === 'per_section',
+        timeLimitMinutes: form.sectionMinutes,
+        calculatorAllowed: form.calculatorAllowed,
       },
-    ]
+      questions: [],
+    }
 
     const created = assessmentService.createAssessment({
-      title: title.trim(),
-      subtitle: subtitle.trim(),
-      subject: subject.trim(),
-      grade: grade.trim(),
-      description: description.trim(),
-      instructions: instructions.trim(),
+      ...(candidateIdRef.current ? { id: candidateIdRef.current } : {}),
+      title: form.title.trim(),
+      subtitle: form.subtitle.trim(),
+      subject: form.subject.trim(),
+      grade: form.grade.trim(),
+      description: form.description.trim(),
+      instructions: form.instructions.trim(),
       status: 'draft',
       settings: {
         ...defaultAssessmentSettings,
-        timerMode,
-        attempts,
-        passcodeEnabled,
-        passcode,
+        scoring: { scheme: form.scoringScheme, mode: 'default', sections: [] },
+        timerMode: form.timerMode,
+        timerEnabled: form.timerMode !== 'untimed',
+        timerMinutes: form.overallMinutes,
+        attempts: form.attempts,
+        passcodeEnabled: form.passcodeEnabled,
+        // Never store the legacy default '1234' for a newly created assessment.
+        passcode: form.passcodeEnabled ? form.passcode.trim() : '',
       },
-      sections: initialSections,
+      sections: [initialSection],
     })
-
+    candidateIdRef.current = created.id
     return created
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!title.trim()) return
+  const persistDraft = async (): Promise<Assessment> => {
+    if (savedAssessmentRef.current) return savedAssessmentRef.current
+    if (savePromiseRef.current) return savePromiseRef.current
 
-    setIsPersisting(true)
+    const promise = (async () => {
+      setIsPersisting(true)
+      setOperationError(null)
+      setPersistStatus('Saving assessment...')
+      let draft: Assessment | null = null
+      try {
+        draft = buildDraft()
+        await assessmentService.syncAssessmentToDatabase(draft)
+        savedAssessmentRef.current = draft
+        setPersistStatus('Assessment saved.')
+        return draft
+      } catch (error) {
+        if (draft) {
+          // The database might already have committed the row. We only remove
+          // the local cache entry, and retry with the SAME ID next time.
+          assessmentService.saveStoredAssessments(
+            assessmentService.getStoredAssessments().filter((item) => item.id !== draft!.id)
+          )
+        }
+        throw error
+      } finally {
+        setIsPersisting(false)
+        setPersistStatus('')
+      }
+    })()
+
+    savePromiseRef.current = promise
     try {
-      const created = persistAssessment()
-      await assessmentService.syncAssessmentToDatabase(created)
-      navigate(`/admin/assessments/${created.id}`)
-    } catch (error) {
-      console.error('Failed to create assessment:', error)
-      alert(
-        `Failed to create assessment.\n\n${
-          error instanceof Error ? error.message : 'Database request failed.'
-        }`
-      )
+      return await promise
     } finally {
-      setIsPersisting(false)
+      savePromiseRef.current = null
     }
   }
 
+  const saveBeforeNavigation = async () => {
+    if (!isDirty) return
+    await persistDraft()
+  }
+
+  // Once Supabase confirms the draft is saved, it is no longer an unsaved
+  // creation form. Let the navigation guard observe that clean state before
+  // routing to the editor; otherwise React Router can block the redirect with
+  // the stale dirty registration from the preceding render.
+  const markClean = useUnsavedChanges(isDirty && editorDestination === null, saveBeforeNavigation)
+
+  useEffect(() => {
+    if (!editorDestination) return
+    const navigationTimer = window.setTimeout(() => {
+      navigate(`/admin/assessments/${editorDestination}`, { replace: true })
+    }, 0)
+    return () => window.clearTimeout(navigationTimer)
+  }, [editorDestination, navigate])
+
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (isPersisting || savePromiseRef.current) return
+    if (validation.length > 0) {
+      setOperationError(validation.join('. ') + '.')
+      return
+    }
+    try {
+      const saved = await persistDraft()
+      markClean()
+      // Commit the clean state first; the effect navigates after React has
+      // updated the shared unsaved-changes guard.
+      setEditorDestination(saved.id)
+    } catch (error) {
+      console.error('Assessment draft could not be saved:', error)
+      const record = error as { message?: string; details?: string; hint?: string; code?: string }
+      setOperationError(
+        [record?.message, record?.details, record?.hint, record?.code ? `Code: ${record.code}` : null]
+          .filter(Boolean)
+          .join(' — ') || 'The draft could not be saved. Please try again.'
+      )
+    }
+  }
+
+  const timingLabel = form.timerMode === 'untimed'
+    ? 'Untimed'
+    : form.timerMode === 'per_assessment'
+      ? `${form.overallMinutes || '—'} min overall`
+      : `${form.sectionMinutes || '—'} min / section`
+
   return (
     <AdminLayout
-      title="Create New Assessment"
-      subtitle="Configure diagnostic parameters, assessment settings, and initial modular sections"
+      title="Create Assessment"
+      subtitle="Set up the assessment, choose questions, and preview it before sharing."
       actions={
         <button
           type="button"
           onClick={() => navigate('/admin/assessments')}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
+          disabled={isPersisting}
+          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
         >
-          <ArrowLeft className="h-3.5 w-3.5" />
-          <span>Back</span>
+          <ArrowLeft className="h-4 w-4" /> Assessment library
         </button>
       }
     >
-      <form onSubmit={handleSubmit} className="max-w-4xl mx-auto space-y-6">
-        {/* Step 1: Assessment Metadata */}
-        <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-2xs space-y-4">
-          <h2 className="text-sm font-bold text-slate-900">Assessment Identity & Overview</h2>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="md:col-span-2">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Assessment Title <span className="text-rose-500">*</span>
-              </label>
-              <input
-                type="text"
-                required
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. High School Algebra I Diagnostic Benchmark Form A"
-                className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Subtitle / Tagline</label>
-              <input
-                type="text"
-                value={subtitle}
-                onChange={(e) => setSubtitle(e.target.value)}
-                placeholder="e.g. Linear Equations, Quadratics & Polynomial Functions"
-                className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Subject</label>
-                <input
-                  type="text"
-                  value={subject}
-                  onChange={(e) => setSubject(e.target.value)}
-                  placeholder="e.g. Mathematics"
-                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
-                />
+      <form onSubmit={handleSubmit} className="mx-auto max-w-6xl space-y-5 pb-10">
+        <div className="rounded-2xl border border-blue-200 bg-blue-50 p-5">
+          <label htmlFor="new-assessment-scoring" className="mb-2 block text-sm font-bold text-slate-900">Scoring scheme</label>
+          <select id="new-assessment-scoring" aria-describedby="scoring-help" className={fieldClass} value={form.scoringScheme}
+            onChange={event => update('scoringScheme', event.target.value as ScoringScheme)}>
+            {Object.entries(scoringLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+          <p id="scoring-help" className="mt-2 text-xs leading-5 text-slate-600">Choose <strong>Standard</strong> for a regular classroom assessment. Use SAT, ACT, or EST only when preparing for that exam. Scaled scores are practice estimates unless you configure the appropriate conversion table later. Your choice does not change any previous student results.</p>
+        </div>
+        <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+          <div className="bg-slate-950 px-6 py-6 text-white sm:px-8 sm:py-7">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="min-w-0">
+                <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[11px] font-bold tracking-wide text-blue-100">
+                  <Sparkles className="h-3.5 w-3.5" /> NEW ASSESSMENT
+                </span>
+                <h2 className="mt-3 text-xl font-bold tracking-tight sm:text-2xl" style={{ color: '#ffffff' }}>
+                  Create an assessment
+                </h2>
+                <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-slate-300">
+                  Give your assessment a name, choose its settings, and save a private draft. You can add questions and preview it before students see it.
+                </p>
               </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Grade / Level</label>
-                <input
-                  type="text"
-                  value={grade}
-                  onChange={(e) => setGrade(e.target.value)}
-                  placeholder="e.g. Grade 10"
-                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
-                />
+              <div className="flex items-center gap-2 rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-xs font-semibold text-slate-100">
+                <ShieldCheck className="h-4 w-4 text-emerald-300" /> Not published
               </div>
             </div>
-
-            <div className="md:col-span-2">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Description</label>
-              <textarea
-                rows={2}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Summarize the purpose of this diagnostic and what student skills are evaluated..."
-                className="w-full rounded-xl border border-slate-200 px-3.5 py-2 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">General Instructions</label>
-              <textarea
-                rows={2}
-                value={instructions}
-                onChange={(e) => setInstructions(e.target.value)}
-                placeholder="Instructions presented to the student before starting the test..."
-                className="w-full rounded-xl border border-slate-200 px-3.5 py-2 text-xs text-slate-900 focus:border-blue-500 focus:outline-none"
-              />
-            </div>
+          </div>
+          <div className="grid gap-3 border-t border-slate-100 bg-slate-50 px-6 py-3 text-xs font-semibold text-slate-600 sm:grid-cols-3 sm:px-8">
+            <span className="inline-flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-emerald-600" /> 1. Define the assessment</span>
+            <span className="inline-flex items-center gap-2"><Layers3 className="h-4 w-4 text-blue-600" /> 2. Add questions in editor</span>
+            <span className="inline-flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-slate-500" /> 3. Preview and publish</span>
           </div>
         </div>
 
-        {/* Step 3: High-Level Assessment Settings */}
-        <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-2xs space-y-4">
-          <h2 className="text-sm font-bold text-slate-900">High-Level Assessment Settings</h2>
-          <p className="text-xs text-slate-500">
-            You can further customize granular behavioral, navigation, registration, and feedback settings inside the Assessment Studio.
-          </p>
+        <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_290px]">
+          <div className="min-w-0 space-y-5">
+            <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+              <div className="mb-5 flex items-start gap-3">
+                <div className="rounded-xl bg-blue-50 p-2.5 text-blue-600"><GraduationCap className="h-5 w-5" /></div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Assessment details</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">Give your assessment a clear name and audience.</p>
+                </div>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="sm:col-span-2">
+                  <label htmlFor="assessment-title" className={labelClass}>Assessment title <span className="text-rose-600">*</span></label>
+                  <input id="assessment-title" className={fieldClass} required maxLength={160} disabled={isPersisting}
+                    placeholder="e.g. Algebra I Diagnostic — Fall 2026" value={form.title} onChange={(event) => update('title', event.target.value)} />
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor="assessment-subtitle" className={labelClass}>Subtitle <span className="font-normal text-slate-400">(optional)</span></label>
+                  <input id="assessment-subtitle" className={fieldClass} disabled={isPersisting} maxLength={240}
+                    placeholder="e.g. Equations, functions, and graphs" value={form.subtitle} onChange={(event) => update('subtitle', event.target.value)} />
+                </div>
+                <div>
+                  <label htmlFor="assessment-subject" className={labelClass}>Subject <span className="text-rose-600">*</span></label>
+                  <input id="assessment-subject" className={fieldClass} required disabled={isPersisting} value={form.subject}
+                    onChange={(event) => update('subject', event.target.value)} />
+                </div>
+                <div>
+                  <label htmlFor="assessment-grade" className={labelClass}>Grade / level <span className="text-rose-600">*</span></label>
+                  <input id="assessment-grade" className={fieldClass} required disabled={isPersisting} value={form.grade}
+                    onChange={(event) => update('grade', event.target.value)} />
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor="assessment-description" className={labelClass}>Description</label>
+                  <textarea id="assessment-description" rows={3} className={fieldClass} disabled={isPersisting}
+                    placeholder="What skills will this assessment measure?" value={form.description}
+                    onChange={(event) => update('description', event.target.value)} />
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor="assessment-instructions" className={labelClass}>Student instructions</label>
+                  <textarea id="assessment-instructions" rows={3} className={fieldClass} disabled={isPersisting}
+                    value={form.instructions} onChange={(event) => update('instructions', event.target.value)} />
+                </div>
+              </div>
+            </section>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-1">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Timer Mode</label>
-              <select
-                value={timerMode}
-                onChange={(e) => setTimerMode(e.target.value as any)}
-                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 bg-white"
-              >
-                <option value="per_section">Per-Section Timers (Recommended)</option>
-                <option value="per_assessment">Single Overall Assessment Timer</option>
-                <option value="untimed">Untimed Mode</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Allowed Attempts</label>
-              <select
-                value={attempts}
-                onChange={(e) => setAttempts(Number(e.target.value))}
-                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 bg-white"
-              >
-                <option value={1}>1 Attempt Only (Standard Exam)</option>
-                <option value={2}>2 Attempts</option>
-                <option value={3}>3 Attempts</option>
-                <option value={0}>Unlimited Attempts</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Passcode Protection</label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="passcodeToggle"
-                  checked={passcodeEnabled}
-                  onChange={(e) => setPasscodeEnabled(e.target.checked)}
-                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                />
-                <label htmlFor="passcodeToggle" className="text-xs text-slate-700 font-medium">
-                  Require Access Code
+            <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+              <div className="mb-5 flex items-start gap-3">
+                <div className="rounded-xl bg-indigo-50 p-2.5 text-indigo-600"><Layers3 className="h-5 w-5" /></div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Initial section</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">Your draft starts with one empty section. Add questions after saving.</p>
+                </div>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="section-title" className={labelClass}>Section name <span className="text-rose-600">*</span></label>
+                  <input id="section-title" className={fieldClass} required disabled={isPersisting} value={form.sectionTitle}
+                    onChange={(event) => update('sectionTitle', event.target.value)} />
+                </div>
+                <label className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <span className="min-w-0">
+                    <span className="block text-sm font-bold text-slate-800">Calculator allowed</span>
+                    <span className="mt-0.5 block text-xs text-slate-500">Show the on-screen calculator in this section.</span>
+                  </span>
+                  <input type="checkbox" className="h-4 w-4 shrink-0 accent-blue-600" checked={form.calculatorAllowed}
+                    disabled={isPersisting} onChange={(event) => update('calculatorAllowed', event.target.checked)} />
                 </label>
               </div>
-              {passcodeEnabled && (
-                <input
-                  type="text"
-                  value={passcode}
-                  onChange={(e) => setPasscode(e.target.value)}
-                  placeholder="e.g. 1234"
-                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-1.5 text-xs"
-                />
+            </section>
+
+            <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+              <div className="mb-5 flex items-start gap-3">
+                <div className="rounded-xl bg-amber-50 p-2.5 text-amber-700"><Clock3 className="h-5 w-5" /></div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Timing & delivery</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">Set a starting policy. Detailed rules remain editable later.</p>
+                </div>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="timer-mode" className={labelClass}>Timer mode</label>
+                  <select id="timer-mode" className={fieldClass} disabled={isPersisting} value={form.timerMode}
+                    onChange={(event) => update('timerMode', event.target.value as TimerMode)}>
+                    <option value="per_section">Per-section timer</option>
+                    <option value="per_assessment">Overall assessment timer</option>
+                    <option value="untimed">No timer</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="allowed-attempts" className={labelClass}>Allowed attempts</label>
+                  <select id="allowed-attempts" className={fieldClass} disabled={isPersisting} value={form.attempts}
+                    onChange={(event) => update('attempts', Number(event.target.value))}>
+                    <option value={1}>1 attempt</option>
+                    <option value={2}>2 attempts</option>
+                    <option value={3}>3 attempts</option>
+                    <option value={0}>Unlimited attempts</option>
+                  </select>
+                </div>
+                {form.timerMode === 'per_section' && (
+                  <div className="sm:col-span-2">
+                    <label htmlFor="section-minutes" className={labelClass}>First section time limit (minutes)</label>
+                    <input id="section-minutes" type="number" min={1} max={300} required className={fieldClass} disabled={isPersisting}
+                      value={form.sectionMinutes} onChange={(event) => update('sectionMinutes', Number(event.target.value))} />
+                  </div>
+                )}
+                {form.timerMode === 'per_assessment' && (
+                  <div className="sm:col-span-2">
+                    <label htmlFor="overall-minutes" className={labelClass}>Overall time limit (minutes)</label>
+                    <input id="overall-minutes" type="number" min={1} max={600} required className={fieldClass} disabled={isPersisting}
+                      value={form.overallMinutes} onChange={(event) => update('overallMinutes', Number(event.target.value))} />
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+              <div className="mb-5 flex items-start gap-3">
+                <div className="rounded-xl bg-emerald-50 p-2.5 text-emerald-700"><LockKeyhole className="h-5 w-5" /></div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Student access</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">Optional access code. No default code is assigned.</p>
+                </div>
+              </div>
+              <label className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <span className="min-w-0">
+                  <span className="block text-sm font-bold text-slate-800">Require an access code</span>
+                  <span className="mt-0.5 block text-xs text-slate-500">Students must enter this code to begin.</span>
+                </span>
+                <input type="checkbox" className="h-4 w-4 shrink-0 accent-blue-600" disabled={isPersisting}
+                  checked={form.passcodeEnabled} onChange={(event) => update('passcodeEnabled', event.target.checked)} />
+              </label>
+              {form.passcodeEnabled && (
+                <div className="mt-4">
+                  <label htmlFor="assessment-passcode" className={labelClass}>Access code <span className="text-rose-600">*</span></label>
+                  <div className="relative">
+                    <KeyRound className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" />
+                    <input id="assessment-passcode" className={`${fieldClass} pl-10`} type="text" required autoComplete="off"
+                      disabled={isPersisting} placeholder="Choose a private access code" value={form.passcode}
+                      onChange={(event) => update('passcode', event.target.value)} />
+                  </div>
+                  <p className="mt-1.5 text-xs text-slate-500">Share this code only with the intended students.</p>
+                </div>
               )}
-            </div>
+            </section>
           </div>
+
+          <aside className="space-y-4 lg:sticky lg:top-5">
+            <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-bold text-slate-900">Draft overview</h3>
+                <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-700">Draft</span>
+              </div>
+              <p className="mt-3 break-words text-base font-bold text-slate-900">{form.title.trim() || 'Untitled assessment'}</p>
+              <p className="mt-1 text-xs text-slate-500">{form.grade.trim() || 'No level'} · {form.subject.trim() || 'No subject'}</p>
+              <div className="mt-4 space-y-3 border-y border-slate-100 py-4 text-xs">
+                <div className="flex items-center justify-between gap-2 text-slate-600"><span className="inline-flex items-center gap-2"><Layers3 className="h-4 w-4" /> Sections</span><strong className="text-slate-900">1</strong></div>
+                <div className="flex items-center justify-between gap-2 text-slate-600"><span className="inline-flex items-center gap-2"><BookOpen className="h-4 w-4" /> Questions</span><strong className="text-slate-900">0 — add next</strong></div>
+                <div className="flex items-center justify-between gap-2 text-slate-600"><span className="inline-flex items-center gap-2"><Clock3 className="h-4 w-4" /> Timing</span><strong className="text-right text-slate-900">{timingLabel}</strong></div>
+                <div className="flex items-center justify-between gap-2 text-slate-600"><span className="inline-flex items-center gap-2"><FileText className="h-4 w-4" /> Attempts</span><strong className="text-slate-900">{form.attempts === 0 ? 'Unlimited' : form.attempts}</strong></div>
+                <div className="flex items-center justify-between gap-2 text-slate-600"><span className="inline-flex items-center gap-2"><KeyRound className="h-4 w-4" /> Access</span><strong className="text-slate-900">{form.passcodeEnabled ? 'Code required' : 'Open'}</strong></div>
+              </div>
+              {validation.length === 0 ? (
+                <p className="mt-4 flex items-start gap-2 text-xs leading-5 text-emerald-700"><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> Ready to save as a draft.</p>
+              ) : (
+                <div className="mt-4 text-xs leading-5 text-slate-600">
+                  <p className="font-bold text-slate-800">Before saving:</p>
+                  <ul className="mt-1 list-disc space-y-1 pl-4">{validation.map((issue) => <li key={issue}>{issue}</li>)}</ul>
+                </div>
+              )}
+              <button type="submit" disabled={isPersisting || validation.length > 0}
+                style={{ backgroundColor: '#2563eb', color: '#ffffff' }}
+                className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-xs font-bold shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50">
+                {isPersisting ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <Save className="h-4 w-4" />}
+                {isPersisting ? 'Saving draft...' : 'Create draft & open editor'}
+                {!isPersisting && <ArrowRight className="h-4 w-4" />}
+              </button>
+              <p className="mt-3 text-center text-[11px] leading-4 text-slate-500">This only saves a private draft. You'll add questions and choose when to publish in the next screen.</p>
+            </div>
+            <div className="rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800">
+              <div className="flex items-center gap-2 font-bold"><ShieldCheck className="h-4 w-4" /> Existing student data is untouched</div>
+              <p className="mt-1 text-blue-700">This creates a new draft. It does not edit existing assessments, student attempts, or scoring.</p>
+            </div>
+          </aside>
         </div>
 
-        {/* Submit action */}
-        <div className="flex items-center justify-end gap-3 pt-2">
-          <button
-            type="button"
-            onClick={() => navigate('/admin/assessments')}
-            className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={isPersisting}
-            style={{ backgroundColor: '#2563eb', color: '#ffffff' }}
-            className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition shadow-xs cursor-pointer disabled:opacity-70 disabled:cursor-not-allowed"
-          >
-            <Save className="h-3.5 w-3.5" />
-            <span>{isPersisting ? 'Saving...' : 'Create & Save'}</span>
-          </button>
+        {operationError && (
+          <div role="alert" aria-live="assertive" className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800">
+            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <p className="font-bold">Could not save assessment draft</p>
+              <p className="mt-1 break-words">{operationError}</p>
+              <p className="mt-1 text-rose-700">Your changes are still here. Please try again.</p>
+            </div>
+            <button type="button" onClick={() => setOperationError(null)} className="font-bold underline">Dismiss</button>
+          </div>
+        )}
+        {isPersisting && (
+          <div role="status" aria-live="polite" className="flex items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs font-medium text-blue-800">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-200 border-t-blue-600" />
+            {persistStatus || 'Saving your draft...'}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-4">
+          <span className="text-xs text-slate-500">{isDirty ? 'Unsaved draft changes' : 'New assessment'}</span>
+          <button type="button" onClick={() => navigate('/admin/assessments')} disabled={isPersisting}
+            className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Back to library</button>
         </div>
       </form>
     </AdminLayout>

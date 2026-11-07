@@ -43,6 +43,7 @@ export interface TaxonomyTreeProps {
   // Report breakdown mode
   breakdowns?: BreakdownRow[]
   visibleFields?: string[]
+  hideRawCounts?: boolean
   onSelect?: (type: TaxonomyType, label: string) => void
   activeFilter?: { type: TaxonomyType; label: string } | null
 }
@@ -131,6 +132,7 @@ export const TaxonomyTree: React.FC<TaxonomyTreeProps> = ({
   onDeleteNode,
   breakdowns,
   visibleFields,
+  hideRawCounts = false,
   onSelect,
   activeFilter,
 }) => {
@@ -211,9 +213,9 @@ export const TaxonomyTree: React.FC<TaxonomyTreeProps> = ({
             {showField('rowLabels') && <span className="truncate text-slate-800">{b.label}</span>}
           </div>
 
-          {(showField('answerCounts') || showField('percentages') || showField('classifications')) && (
+          {((!hideRawCounts && showField('answerCounts')) || showField('percentages') || showField('classifications')) && (
           <div className="flex items-center gap-2 shrink-0">
-            {showField('answerCounts') && <span className="text-[11px] text-slate-400">
+            {(!hideRawCounts && showField('answerCounts')) && <span className="text-[11px] text-slate-400">
               {b.correct_count}/{b.total_questions}
             </span>}
             {showField('percentages') && <span className="text-[11px] text-slate-400">

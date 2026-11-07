@@ -27,12 +27,13 @@ export default function TimeAnalysisSection({ timeAnalysis, visibleFields }: Tim
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 className="text-base font-semibold text-slate-900">Pacing & Time Analysis</h3>
-          {showField('overallAverage') && <p className="text-xs sm:text-sm text-slate-500">
-            Evaluating category pacing against the overall test benchmark of{' '}
-            <strong className="text-slate-700">{formatSeconds(overallAvgTime)}</strong> per question.
-          </p>}
+          {showField('overallAverage') && (overallAvgTime > 0 ? <p className="text-xs sm:text-sm text-slate-500">
+            Evaluating category pacing using recorded per-question timing. Overall average: <strong className="text-slate-700">{formatSeconds(overallAvgTime)}</strong>.
+          </p> : <p className="text-xs sm:text-sm text-slate-500">
+            Per-question timing was not recorded for this attempt, so pacing comparisons are unavailable. Total duration alone cannot identify the time spent on each question.
+          </p>)}
         </div>
-        {showField('threshold') && <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+        {overallAvgTime > 0 && showField('threshold') && <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
           Threshold: &gt;+{slowThresholdPct}% slower than average
         </span>}
       </div>

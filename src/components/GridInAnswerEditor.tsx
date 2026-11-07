@@ -12,13 +12,14 @@ export default function GridInAnswerEditor({ value, onChange }: GridInAnswerEdit
           Correct numeric answer
         </label>
         <input
-          type="number"
-          step="any"
+          type="text"
+          inputMode="decimal"
           value={value.value}
           onChange={(e) => onChange({ ...value, value: e.target.value })}
           className="w-full border border-slate-300 rounded-md px-3 py-2"
-          placeholder="e.g. 42.5"
+          placeholder="e.g. 0.5 or 1/2"
         />
+        <p className="mt-1 text-xs text-slate-500">Equivalent decimals and fractions (for example 0.5 and 1/2) represent the same answer.</p>
       </div>
       <div>
         <label className="block text-sm font-medium text-slate-700 mb-1">

@@ -1,14 +1,14 @@
 import { useState } from 'react'
-import type { ReactNode } from 'react'
 import ContentBlockRenderer from '../ContentBlockRenderer'
+import MathRenderer from '../MathRenderer'
 import type { ChoiceOption, QuestionReviewItem } from './Types'
 import { classifyQuestionState } from '../../lib/diagnosticAnalytics'
 import { ThreeStateBadge } from './ThreeStateDonutChart'
 
-function formatTime(s: number) {
-  const m = Math.floor(s / 60)
-  const sec = s % 60
-  return m > 0 ? `${m}m ${sec}s` : `${sec}s`
+function formatTime(seconds: number): string {
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`
 }
 
 function Tag({ label, value }: { label: string; value: string }) {
@@ -20,61 +20,56 @@ function Tag({ label, value }: { label: string; value: string }) {
 }
 
 function ChoiceText({ id, choices }: { id: string; choices: ChoiceOption[] }) {
-  const c = choices.find((ch) => ch.id === id)
-  if (!c) return <>{id}</>
-  return <ContentBlockRenderer blocks={c.content_blocks} />
+  const choice = choices.find((item) => item.id === id)
+  if (!choice) return <>{id}</>
+  return <ContentBlockRenderer blocks={choice.content_blocks} />
 }
 
-function formatAnswer(ans: Record<string, unknown>, choices: ChoiceOption[], status: string): ReactNode {
-  if (status === 'unanswered' || !ans || Object.keys(ans).length === 0 || ans.unanswered === true) {
+function formatStudentResponse(
+  answer: Record<string, unknown>,
+  choices: ChoiceOption[],
+  status: string,
+) {
+  if (
+    status === 'unanswered' ||
+    !answer ||
+    Object.keys(answer).length === 0 ||
+    answer.unanswered === true
+  ) {
     return (
-      <span className="inline-flex items-center gap-1 text-xs italic text-slate-500 font-medium">
-        Unanswered — no response was recorded before submission
+      <span className="text-xs font-medium italic text-slate-500">
+        Unanswered — no response was recorded before submission.
       </span>
     )
   }
 
-  const raw = ans.choice_ids ?? ans.choice_id ?? ans.selected_choice_ids
+  if (answer.choice_idx !== undefined && answer.choice_idx !== null) {
+    const index = Number(answer.choice_idx)
+    if (Number.isInteger(index) && index >= 0 && index < choices.length) {
+      return <ContentBlockRenderer blocks={choices[index].content_blocks} />
+    }
+  }
+
+  const raw = answer.choice_ids ?? answer.choice_id ?? answer.selected_choice_ids
   if (raw !== undefined) {
     const ids = Array.isArray(raw) ? raw : [raw]
     return (
       <div className="space-y-1">
-        {ids.map((id: string, i: number) => (
-          <div key={i}>
+        {ids.map((id: unknown, index: number) => (
+          <div key={`${String(id)}-${index}`}>
             <ChoiceText id={String(id)} choices={choices} />
           </div>
         ))}
       </div>
     )
   }
-  if (ans.value !== undefined) return <>{String(ans.value)}</>
-  if (ans.text !== undefined) return <>{String(ans.text)}</>
-  if (ans.numerical !== undefined) return <>{String(ans.numerical)}</>
-  return <>{JSON.stringify(ans)}</>
-}
 
-function formatCorrect(q: QuestionReviewItem): ReactNode {
-  if (q.choices?.length) {
-    const correct = q.choices.filter((c) => c.is_correct)
-    if (correct.length)
-      return (
-        <div className="space-y-1">
-          {correct.map((c) => (
-            <div key={c.id}>
-              <ContentBlockRenderer blocks={c.content_blocks} />
-            </div>
-          ))}
-        </div>
-      )
-  }
-  if (q.correct_answer_data?.value !== undefined)
-    return (
-      <>
-        {String(q.correct_answer_data.value)}
-        {q.correct_answer_data.tolerance ? ` ±${q.correct_answer_data.tolerance}` : ''}
-      </>
-    )
-  return <span className="italic text-slate-400">Not available</span>
+  if (answer.value !== undefined) return <>{String(answer.value)}</>
+  if (answer.text !== undefined) return <>{String(answer.text)}</>
+  if (answer.numerical !== undefined) return <>{String(answer.numerical)}</>
+
+  // Do not serialize the full answer object: it can contain grading metadata.
+  return <span className="italic text-slate-500">Response recorded.</span>
 }
 
 interface Props {
@@ -85,98 +80,140 @@ interface Props {
   visibleFields?: string[]
 }
 
-export default function QuestionReviewCard({ question, index, avgTime, highlight, visibleFields }: Props) {
+/** Post-submission review of saved, authorized results. Never fetches answer keys independently. */
+export default function QuestionReviewCard({
+  question,
+  index,
+  avgTime,
+  highlight,
+  visibleFields,
+}: Props) {
   const [open, setOpen] = useState(false)
+  const isIncorrect = classifyQuestionState(question) === 'incorrect'
+  const correctChoices = question.choices.filter((choice) => choice.is_correct)
+  const solutionAvailable = Array.isArray(question.explanation_blocks) && question.explanation_blocks.length > 0
   const showField = (field: string) => !visibleFields || visibleFields.includes(field)
-  const questionStatus = classifyQuestionState(question)
-  const timeRatio = avgTime && avgTime > 0 ? Math.min(question.time_spent_seconds / avgTime, 2) : 0
-  const paceTone =
-    timeRatio > 1.3 ? 'bg-amber-500' : timeRatio < 0.6 ? 'bg-sky-500' : 'bg-slate-400'
+  const status = classifyQuestionState(question)
+  const timeRatio = avgTime && avgTime > 0
+    ? Math.min(question.time_spent_seconds / avgTime, 2)
+    : 0
+  const paceTone = timeRatio > 1.3
+    ? 'bg-amber-500'
+    : timeRatio < 0.6
+      ? 'bg-sky-500'
+      : 'bg-slate-400'
 
   return (
-    <div
+    <article
       id={`q-${question.question_id}`}
-      className={`rounded-2xl border bg-white shadow-sm transition ${
+      data-pdf-question-card="true"
+      data-pdf-review-status={status}
+      className={`overflow-hidden rounded-2xl border bg-white shadow-sm ${
         highlight ? 'border-primary-400 ring-2 ring-primary-100' : 'border-slate-200'
       }`}
     >
-      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-start justify-between gap-4 p-5 text-left">
-        <div className="flex-1">
-          <div className="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        data-pdf-question-header="true"
+        className="flex w-full items-start justify-between gap-4 p-5 text-left"
+      >
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-semibold text-slate-900">Question {index + 1}</span>
-            {showField('status') && <ThreeStateBadge status={questionStatus} />}
+            {showField('status') && <ThreeStateBadge status={status} />}
             {showField('difficulty') && (
               <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium capitalize text-slate-600">
                 {question.difficulty}
               </span>
             )}
-          </div>
-          {showField('questionText') && <div className="mt-2 max-w-none text-slate-800">
-            <ContentBlockRenderer blocks={question.content_blocks} />
-          </div>}
-        </div>
-        <span className="mt-1 shrink-0 text-xs font-semibold text-slate-400">
+          </span>
+          {showField('questionText') && (
+            <span className="mt-2 block text-slate-800">
+              <ContentBlockRenderer blocks={question.content_blocks} />
+            </span>
+          )}
+        </span>
+        <span data-pdf-disclosure-label="true" className="mt-1 shrink-0 text-xs font-semibold text-slate-500">
           {open ? 'Hide details ▲' : 'Show details ▼'}
         </span>
       </button>
 
-      <div className={`space-y-4 border-t border-slate-100 p-5 ${open ? 'block' : 'hidden'} print:block`}>
-        {showField('time') && <div>
-          <div className="flex items-center justify-between text-xs text-slate-500">
-            <span>
-              Time spent:{' '}
-              <strong className="text-slate-700">{formatTime(question.time_spent_seconds)}</strong>
-            </span>
-            {avgTime ? <span>Test Average: {formatTime(avgTime)}</span> : null}
-          </div>
-          <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-100">
-            <div className={`h-full rounded-full ${paceTone}`} style={{ width: `${Math.min(timeRatio * 50, 100)}%` }} />
-          </div>
-        </div>}
+      {/* Keep review content mounted but visually collapsed on screen. The PDF
+          capture can reveal incorrect answers without changing the student's UI. */}
+      <div
+        data-pdf-review-details="true"
+        className={`${open ? 'block' : 'hidden'} space-y-4 border-t border-slate-100 p-5`}
+      >
+          {showField('time') && (
+            <div>
+              <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
+                <span>
+                  Time spent: <strong className="text-slate-700">{formatTime(question.time_spent_seconds)}</strong>
+                </span>
+                {avgTime ? <span>Assessment average: {formatTime(avgTime)}</span> : null}
+              </div>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                <div
+                  className={`h-full rounded-full ${paceTone}`}
+                  style={{ width: `${Math.min(timeRatio * 50, 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
 
-        {showField('taxonomy') && <div className="flex flex-wrap gap-2 text-xs">
-          {question.category_name && <Tag label="Category" value={question.category_name} />}
-          {question.lesson_name && <Tag label="Lesson" value={question.lesson_name} />}
-          {question.skill_name && <Tag label="Skill" value={question.skill_name} />}
-        </div>}
+          {showField('taxonomy') && (
+            <div className="flex flex-wrap gap-2 text-xs">
+              {question.category_name && <Tag label="Category" value={question.category_name} />}
+              {question.lesson_name && <Tag label="Lesson" value={question.lesson_name} />}
+              {question.skill_name && <Tag label="Skill" value={question.skill_name} />}
+            </div>
+          )}
 
-        {(showField('studentResponse') || showField('expectedSolution')) && (
-        <div className="grid gap-3 sm:grid-cols-2">
-          {showField('studentResponse') && <div className={`rounded-xl border p-3.5 ${
-            questionStatus === 'unanswered'
-              ? 'border-slate-200 bg-slate-50/70'
-              : questionStatus === 'correct'
-              ? 'border-emerald-200 bg-emerald-50/40'
-              : 'border-rose-200 bg-rose-50/40'
-          }`}>
-            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-              Student Response
+          {(isIncorrect || showField('studentResponse')) && (
+            <div className={`rounded-xl border p-4 ${
+              status === 'unanswered'
+                ? 'border-slate-200 bg-slate-50'
+                : status === 'correct'
+                  ? 'border-emerald-200 bg-emerald-50/40'
+                  : 'border-rose-200 bg-rose-50/40'
+            }`}>
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Your response
+              </div>
+              <div className="mt-2 text-sm text-slate-800">
+                {formatStudentResponse(question.student_answer, question.choices, status)}
+              </div>
             </div>
-            <div className="mt-1.5 text-sm text-slate-800">
-              {formatAnswer(question.student_answer, question.choices, questionStatus)}
-            </div>
-          </div>}
+          )}
 
-          {showField('expectedSolution') && <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3.5">
-            <div className="text-xs font-semibold uppercase tracking-wider text-emerald-800">
-              Expected Solution
+          {isIncorrect && (
+            <div className="space-y-4" aria-label="Incorrect answer explanation">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
+                <h4 className="text-sm font-semibold text-emerald-900">Correct answer</h4>
+                <div className="mt-2 text-sm text-slate-800">
+                  {correctChoices.length ? correctChoices.map((choice) => (
+                    <div key={choice.id} className="flex items-start gap-2">
+                      <span className="font-semibold text-emerald-800">{question.choices.indexOf(choice) + 1}.</span>
+                      <ContentBlockRenderer blocks={choice.content_blocks} />
+                    </div>
+                  )) : question.correct_answer_data?.value !== undefined && question.correct_answer_data?.value !== null
+                    ? <MathRenderer text={String(question.correct_answer_data.value)} />
+                    : <span className="text-slate-600">The correct answer was not included in the saved report.</span>}
+                </div>
+              </div>
+              <div className="rounded-xl border border-sky-200 bg-sky-50/40 p-4">
+                <h4 className="text-sm font-semibold text-sky-900">Complete Step-by-Step Solution</h4>
+                <div className="mt-2 text-sm text-slate-800">
+                  {solutionAvailable
+                    ? <ContentBlockRenderer blocks={question.explanation_blocks} />
+                    : <p className="text-slate-600">No step-by-step solution was provided for this question.</p>}
+                </div>
+              </div>
             </div>
-            <div className="mt-1.5 text-sm text-slate-800">{formatCorrect(question)}</div>
-          </div>}
-        </div>
-        )}
-
-        {showField('explanation') && question.explanation_blocks?.length > 0 && (
-          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4">
-            <div className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-              Step-by-Step Diagnostic Explanation
-            </div>
-            <div className="mt-2 max-w-none text-slate-800">
-              <ContentBlockRenderer blocks={question.explanation_blocks} />
-            </div>
-          </div>
-        )}
+          )}
       </div>
-    </div>
+    </article>
   )
 }

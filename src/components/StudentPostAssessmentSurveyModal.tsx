@@ -12,6 +12,7 @@ import {
 
 interface StudentPostAssessmentSurveyModalProps {
   attemptId: string
+  resumeToken: string
   scorePct?: number
   assessmentTitle?: string
   isOpen: boolean
@@ -21,6 +22,7 @@ interface StudentPostAssessmentSurveyModalProps {
 
 export const StudentPostAssessmentSurveyModal: React.FC<StudentPostAssessmentSurveyModalProps> = ({
   attemptId,
+  resumeToken,
   scorePct = 50,
   assessmentTitle,
   isOpen,
@@ -66,7 +68,7 @@ export const StudentPostAssessmentSurveyModal: React.FC<StudentPostAssessmentSur
     setSubmitError(null)
     setTimeout(async () => {
       try {
-        const plan = await surveyService.saveStudentResponse(attemptId, answers, scorePct)
+        const plan = await surveyService.saveStudentResponse(attemptId, answers, scorePct, resumeToken)
         setGeneratedPlan(plan)
       } catch (error) {
         setSubmitError(error instanceof Error ? error.message : 'Could not save your responses.')

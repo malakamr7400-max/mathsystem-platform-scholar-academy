@@ -1,5 +1,18 @@
+import { defaultScoringConfig, type AssessmentScoringConfig } from './scoringSchemes'
 import { questionBankService, type QuestionBankItem } from './questionBankService'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
+
+export interface AssessmentDeletionImpact {
+  assessment_id: string
+  assessment_name: string
+  status: string
+  attempts: number
+  completed_attempts: number
+  in_progress_attempts: number
+  versions: number
+  blockers: string[]
+  can_delete: boolean
+}
 
 export interface StudentFieldConfig {
   id: string
@@ -11,6 +24,7 @@ export interface StudentFieldConfig {
 }
 
 export interface AssessmentSettings {
+  scoring: AssessmentScoringConfig
   // Timing
   timerMode: 'per_section' | 'per_assessment' | 'untimed'
   timerMinutes: number
@@ -30,6 +44,8 @@ export interface AssessmentSettings {
   showExplanations: boolean
   showAnalytics: boolean
   passingPercentage: number
+  /** Scheme-specific passing grade. Optional for backward compatibility. */
+  passingBenchmark?: { scheme: 'standard' | 'sat' | 'act' | 'est'; value: number }
 
   // Student Intake
   studentFields: StudentFieldConfig[]
@@ -48,6 +64,8 @@ export interface AssessmentSettings {
 }
 
 export interface SectionSettings {
+  /** Optional sections may be declined before their first question. Existing sections are required. */
+  optional?: boolean
   timingEnabled: boolean
   timeLimitMinutes: number
   calculatorAllowed: boolean
@@ -87,14 +105,19 @@ export interface Assessment {
   grade: string
   instructions?: string
   status: 'draft' | 'published' | 'archived'
+  /** Soft-removed from the active library; remains recoverable in Archived. */
+  removedFromLibrary?: boolean
   attemptsCount?: number
   settings: AssessmentSettings
   sections: AssessmentSection[]
+  /** Generic taxonomy relationships. Legacy exam/subject concepts remain separate compatibility metadata. */
+  taxonomyIds?: string[]
   createdAt: string
   updatedAt: string
 }
 
 export const defaultAssessmentSettings: AssessmentSettings = {
+  scoring: defaultScoringConfig,
   timerMode: 'per_section',
   timerMinutes: 60,
   timerEnabled: true,
@@ -126,6 +149,7 @@ export const defaultAssessmentSettings: AssessmentSettings = {
 }
 
 export const defaultSectionSettings: SectionSettings = {
+  optional: false,
   timingEnabled: true,
   timeLimitMinutes: 30,
   calculatorAllowed: true,
@@ -142,296 +166,75 @@ function uid(prefix = 'id'): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
 }
 
-function getInitialSeedAssessments(): Assessment[] {
-  const bankQuestions = questionBankService.getStoredQuestions()
-
-  const q1 = bankQuestions[0] || {
-    id: 'qb-seed-01',
-    prompt: 'If $2x - 2 = 3x$, what is the value of $x + 2$?',
-    difficulty: 'easy',
-    choices: [
-      { id: 'A', text: '-4', isCorrect: false },
-      { id: 'B', text: '-2', isCorrect: false },
-      { id: 'C', text: '0', isCorrect: true },
-      { id: 'D', text: '2', isCorrect: false },
-    ],
+/**
+ * Assessment IDs are persisted to assessments.id, which is a PostgreSQL UUID.
+ * Keep UI/section IDs free-form, but always use a real UUID for assessment rows.
+ */
+function createUuid(): string {
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID()
   }
 
-  const q2 = bankQuestions[1] || {
-    id: 'qb-seed-02',
-    prompt: 'Solve the system: $2x + y = 7$ and $x - y = 2$.',
-    difficulty: 'medium',
-    choices: [
-      { id: 'A', text: '(3, 1)', isCorrect: true },
-      { id: 'B', text: '(1, 3)', isCorrect: false },
-      { id: 'C', text: '(2, 0)', isCorrect: false },
-      { id: 'D', text: '(4, -1)', isCorrect: false },
-    ],
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16)
+    const value = char === 'x' ? random : (random & 0x3) | 0x8
+    return value.toString(16)
+  })
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+/** Map one persisted row into the editor model; never invent section questions. */
+function mapDatabaseAssessment(row: any): Assessment {
+  const storedPayload = row.payload && typeof row.payload === 'object' ? row.payload : {}
+
+  // Keep a defensive fallback for older rows that were written by the
+  // previous representation. New saves always use payload.
+  const legacySections = Array.isArray(row.sections) ? row.sections : []
+  const sections = Array.isArray(storedPayload.sections)
+    ? storedPayload.sections
+    : legacySections
+
+  const settings = {
+    ...defaultAssessmentSettings,
+    ...(storedPayload.settings && typeof storedPayload.settings === 'object'
+      ? storedPayload.settings
+      : {}),
   }
 
-  const q3 = bankQuestions[2] || {
-    id: 'qb-seed-03',
-    prompt: 'Find the vertex of the parabola $y = x^2 - 6x + 5$.',
-    difficulty: 'medium',
-    choices: [
-      { id: 'A', text: '(3, -4)', isCorrect: true },
-      { id: 'B', text: '(-3, 4)', isCorrect: false },
-      { id: 'C', text: '(0, 5)', isCorrect: false },
-      { id: 'D', text: '(6, 5)', isCorrect: false },
-    ],
+  return {
+    id: String(row.id),
+    title: row.name || row.title || 'Untitled Assessment',
+    subtitle: typeof storedPayload.subtitle === 'string' ? storedPayload.subtitle : '',
+    description: row.description || '',
+    subject: storedPayload.subject || row.subject || 'Mathematics',
+    grade: storedPayload.grade || row.grade || 'Grade 10',
+    instructions:
+      row.instructions ||
+      storedPayload.instructions ||
+      'Please complete all sections to the best of your ability.',
+    // step90-6: synchronize removed assessment state even if a legacy edit saved draft.
+    status: (storedPayload.removedFromLibrary === true ? 'archived'
+      : (row.status || (row.is_published ? 'published' : 'draft'))) as Assessment['status'],
+    removedFromLibrary: storedPayload.removedFromLibrary === true,
+    attemptsCount: Number.isFinite(storedPayload.attemptsCount)
+      ? Number(storedPayload.attemptsCount)
+      : 0,
+    settings,
+    sections,
+    taxonomyIds: Array.isArray(storedPayload.taxonomyIds) ? storedPayload.taxonomyIds : [],
+    createdAt: row.created_at || new Date().toISOString(),
+    updatedAt: row.updated_at || new Date().toISOString(),
   }
-
-  const q4 = bankQuestions[3] || {
-    id: 'qb-seed-04',
-    prompt: 'What are the roots of $x^2 - 5x + 6 = 0$?',
-    difficulty: 'easy',
-    choices: [
-      { id: 'A', text: 'x = 2, 3', isCorrect: true },
-      { id: 'B', text: 'x = -2, -3', isCorrect: false },
-      { id: 'C', text: 'x = 1, 6', isCorrect: false },
-      { id: 'D', text: 'x = -1, -6', isCorrect: false },
-    ],
-  }
-
-  return [
-    {
-      id: 'diagnostic-algebra-1',
-      title: 'High School Algebra I Benchmark Diagnostic',
-      subtitle: 'Linear Equations, Systems & Quadratics Diagnostic',
-      description:
-        'Comprehensive 2-section evaluation covering foundational algebraic manipulations without calculator, followed by applied modeling with calculator permitted.',
-      subject: 'Mathematics',
-      grade: 'Grade 9-10',
-      instructions:
-        'Please read all directions carefully. Section 1 prohibits calculator use. Section 2 allows an approved calculator.',
-      status: 'published',
-      attemptsCount: 142,
-      settings: {
-        ...defaultAssessmentSettings,
-        timerMode: 'per_section',
-        attempts: 2,
-        passingPercentage: 75,
-      },
-      sections: [
-        {
-          id: 'sec-alg-1',
-          title: 'Section 1: Foundations & Systems (No Calculator)',
-          description: 'Mental math, single-variable equations, and linear systems without calculator assistance.',
-          displayOrder: 0,
-          settings: {
-            ...defaultSectionSettings,
-            timeLimitMinutes: 25,
-            calculatorAllowed: false,
-            hasBreakAfter: true,
-            breakDurationMinutes: 5,
-            breakInstructions: 'You have completed Section 1. Take a 5-minute break before proceeding to Section 2.',
-          },
-          questions: [
-            {
-              id: uid('sq'),
-              questionId: q1.id,
-              displayOrder: 0,
-              pointsOverride: 1,
-              required: true,
-              questionSnapshot: q1,
-            },
-            {
-              id: uid('sq'),
-              questionId: q2.id,
-              displayOrder: 1,
-              pointsOverride: 1,
-              required: true,
-              questionSnapshot: q2,
-            },
-          ],
-        },
-        {
-          id: 'sec-alg-2',
-          title: 'Section 2: Quadratics & Functions (Calculator Active)',
-          description: 'Parabolas, root optimization, and applied polynomials with on-screen calculator allowed.',
-          displayOrder: 1,
-          settings: {
-            ...defaultSectionSettings,
-            timeLimitMinutes: 35,
-            calculatorAllowed: true,
-            hasBreakAfter: false,
-            breakDurationMinutes: 0,
-          },
-          questions: [
-            {
-              id: uid('sq'),
-              questionId: q3.id,
-              displayOrder: 0,
-              pointsOverride: 2,
-              required: true,
-              questionSnapshot: q3,
-            },
-            {
-              id: uid('sq'),
-              questionId: q4.id,
-              displayOrder: 1,
-              pointsOverride: 2,
-              required: true,
-              questionSnapshot: q4,
-            },
-          ],
-        },
-      ],
-      createdAt: new Date(Date.now() - 86400000 * 14).toISOString(),
-      updatedAt: new Date(Date.now() - 86400000 * 2).toISOString(),
-    },
-    {
-      id: 'digital-sat-math-1',
-      title: 'Digital SAT Math Diagnostic Practice Test 1',
-      subtitle: 'Module 1 & Module 2 • Official Timed Format',
-      description:
-        'Standard 2-Module Digital SAT format with adaptive sectioning, embedded calculator support, and automated domain analytics.',
-      subject: 'Mathematics',
-      grade: 'SAT Prep / Grade 11-12',
-      instructions:
-        'You may use the built-in Desmos graphing calculator for both modules. Check all calculations and pacing carefully.',
-      status: 'published',
-      attemptsCount: 89,
-      settings: {
-        ...defaultAssessmentSettings,
-        timerMode: 'per_section',
-        attempts: 1,
-        showScore: true,
-        showCorrectAnswers: true,
-        showExplanations: true,
-        showAnalytics: true,
-      },
-      sections: [
-        {
-          id: 'sec-sat-mod1',
-          title: 'Module 1: Math (35 Minutes)',
-          description: 'Covers Algebra, Advanced Math, Problem Solving, and Geometry.',
-          displayOrder: 0,
-          settings: {
-            ...defaultSectionSettings,
-            timeLimitMinutes: 35,
-            calculatorAllowed: true,
-            hasBreakAfter: true,
-            breakDurationMinutes: 10,
-            breakInstructions: '10-minute scheduled intermission between Module 1 and Module 2.',
-          },
-          questions: [
-            {
-              id: uid('sq'),
-              questionId: q1.id,
-              displayOrder: 0,
-              pointsOverride: 1,
-              required: true,
-              questionSnapshot: q1,
-            },
-            {
-              id: uid('sq'),
-              questionId: q3.id,
-              displayOrder: 1,
-              pointsOverride: 1,
-              required: true,
-              questionSnapshot: q3,
-            },
-          ],
-        },
-        {
-          id: 'sec-sat-mod2',
-          title: 'Module 2: Math (35 Minutes)',
-          description: 'Higher difficulty problem sets and multi-step data interpretation.',
-          displayOrder: 1,
-          settings: {
-            ...defaultSectionSettings,
-            timeLimitMinutes: 35,
-            calculatorAllowed: true,
-            hasBreakAfter: false,
-            breakDurationMinutes: 0,
-          },
-          questions: [
-            {
-              id: uid('sq'),
-              questionId: q2.id,
-              displayOrder: 0,
-              pointsOverride: 1,
-              required: true,
-              questionSnapshot: q2,
-            },
-            {
-              id: uid('sq'),
-              questionId: q4.id,
-              displayOrder: 1,
-              pointsOverride: 1,
-              required: true,
-              questionSnapshot: q4,
-            },
-          ],
-        },
-      ],
-      createdAt: new Date(Date.now() - 86400000 * 20).toISOString(),
-      updatedAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-    },
-    {
-      id: 'pre-calculus-readiness',
-      title: 'Pre-Calculus Readiness & Trigonometry Evaluation',
-      subtitle: 'Functions, Unit Circle & Trigonometric Modeling',
-      description:
-        'Evaluates foundational competence in polynomial functions, exponential models, and trigonometry readiness.',
-      subject: 'Mathematics',
-      grade: 'Grade 11-12',
-      instructions: 'Answer all questions to identify priority review concepts before advancing to Pre-Calculus.',
-      status: 'published',
-      attemptsCount: 56,
-      settings: {
-        ...defaultAssessmentSettings,
-        timerMode: 'per_section',
-        attempts: 1,
-      },
-      sections: [
-        {
-          id: 'sec-precalc-1',
-          title: 'Section 1: General Trigonometry & Radian Measure',
-          description: 'Unit circle coordinates, special angles, and trigonometric identities.',
-          displayOrder: 0,
-          settings: {
-            ...defaultSectionSettings,
-            timeLimitMinutes: 40,
-            calculatorAllowed: false,
-            hasBreakAfter: false,
-            breakDurationMinutes: 0,
-          },
-          questions: [
-            {
-              id: uid('sq'),
-              questionId: q2.id,
-              displayOrder: 0,
-              pointsOverride: 1,
-              required: true,
-              questionSnapshot: q2,
-            },
-            {
-              id: uid('sq'),
-              questionId: q3.id,
-              displayOrder: 1,
-              pointsOverride: 1,
-              required: true,
-              questionSnapshot: q3,
-            },
-          ],
-        },
-      ],
-      createdAt: new Date(Date.now() - 86400000 * 10).toISOString(),
-      updatedAt: new Date(Date.now() - 86400000 * 1).toISOString(),
-    },
-  ]
 }
 
 let _assessmentsCache: Assessment[] = []
-let _hasLoadedFromDatabase = false
 
 export const assessmentService = {
   getStoredAssessments(): Assessment[] {
-    if (!_hasLoadedFromDatabase && typeof window !== 'undefined') {
-      this.fetchAssessmentsFromDatabase().catch(() => {})
-    }
     return _assessmentsCache
   },
 
@@ -440,41 +243,161 @@ export const assessmentService = {
   },
 
   /**
-   * Sync a single assessment to database
+   * Resolve the authenticated user's organization. The assessments table requires
+   * organization_id, while the editor's Assessment model intentionally keeps that
+   * database concern outside the UI model.
+   */
+  async getCurrentOrganizationId(): Promise<string> {
+    if (!supabase || !isSupabaseConfigured) {
+      throw new Error('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
+    }
+
+    const { data: userData, error: userError } = await supabase.auth.getUser()
+    if (userError) throw userError
+
+    const userId = userData.user?.id
+    if (!userId) throw new Error('You must be signed in to save an assessment.')
+
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('organization_id')
+      .eq('id', userId)
+      .maybeSingle()
+
+    if (profileError) throw profileError
+    if (!profile?.organization_id) {
+      throw new Error('Your account is not associated with an organization.')
+    }
+
+    return String(profile.organization_id)
+  },
+
+  /**
+   * Persist the complete editor model using the actual assessments schema.
+   *
+   * The structured assessment model (sections, questions, settings, etc.) lives
+   * in the payload JSONB column. Only fields that actually exist on the
+   * assessments table are written as top-level columns.
    */
   async syncAssessmentToDatabase(assessment: Assessment): Promise<void> {
     if (!supabase || !isSupabaseConfigured) {
       throw new Error('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
     }
+    if (!isUuid(assessment.id)) throw new Error('Invalid assessment ID.')
+    if (assessment.removedFromLibrary && assessment.status !== 'archived') {
+      throw new Error('This assessment was removed from the library. Restore it before editing or publishing.')
+    }
 
-    const { error } = await supabase.from('assessments').upsert({
-      id: assessment.id,
-      title: assessment.title,
-      description: assessment.description || '',
+    // Keep the existing payload-based editor model. The normalized modules and
+    // module_questions tables are not currently written by this service.
+    const taxonomyIds = Array.from(
+      new Set((assessment.taxonomyIds || []).map(String).map((id) => id.trim()).filter(Boolean))
+    )
+    for (const taxonomyId of taxonomyIds) {
+      if (!isUuid(taxonomyId)) throw new Error(`Invalid taxonomy ID: ${taxonomyId}`)
+    }
+
+    const payload = {
+      subtitle: assessment.subtitle || '',
       subject: assessment.subject || 'Mathematics',
       grade: assessment.grade || 'Grade 10',
-      duration_minutes: assessment.settings?.timerMinutes || 60,
+      attemptsCount: assessment.attemptsCount ?? 0,
+      settings: assessment.settings,
       sections: assessment.sections || [],
-      is_published: assessment.status === 'published',
-      created_at: assessment.createdAt || new Date().toISOString(),
-      updated_at: assessment.updatedAt || new Date().toISOString(),
+      taxonomyIds,
+      ...(assessment.removedFromLibrary ? { removedFromLibrary: true } : {}),
+    }
+
+    // Step 30: a single PostgreSQL function saves the assessment row and
+    // taxonomy relationships transactionally, under the caller's RLS policies.
+    // Install migration 0043 before deploying this file. Never fall back to
+    // multi-request writes, as that would silently lose the atomicity guarantee.
+    const { data: savedId, error: saveError } = await supabase.rpc('save_assessment_atomic_v1', {
+      p_assessment_id: assessment.id,
+      p_name: assessment.title,
+      p_description: assessment.description || '',
+      p_instructions: assessment.instructions || '',
+      p_status: assessment.status,
+      p_payload: payload,
+      p_taxonomy_ids: taxonomyIds,
+      p_created_at: assessment.createdAt || new Date().toISOString(),
     })
-    if (error) throw error
+
+    if (saveError) {
+      if (saveError.code === 'PGRST202' || saveError.message.includes('save_assessment_atomic_v1')) {
+        throw new Error('Atomic save RPC is unavailable. Apply migration 0043_assessment_payload_taxonomy_atomic.sql before using this version of the app. ' + saveError.message)
+      }
+      throw saveError
+    }
+    if (savedId !== assessment.id) {
+      throw new Error(`Assessment ${assessment.id} was not confirmed by the atomic database save.`)
+    }
+
+    // Verify the saved row can be read with the current session; this catches
+    // SELECT policy mismatch before the editor reports a successful save.
+    const { data: verified, error: readError } = await supabase
+      .from('assessments')
+      .select('id')
+      .eq('id', assessment.id)
+      .maybeSingle()
+    if (readError) throw readError
+    if (!verified) {
+      throw new Error(`Assessment ${assessment.id} was saved but is not readable. Check assessments SELECT RLS permissions.`)
+    }
   },
 
   /**
    * Delete an assessment from database
    */
   async deleteAssessmentFromDatabase(id: string): Promise<void> {
-    const { error } = await supabase.from('assessments').delete().eq('id', id)
+    const { data, error } = await supabase.rpc('remove_assessment_from_library_safely_v1', { p_assessment_id: id })
     if (error) throw error
+    if (data !== true) throw new Error('Assessment removal was not confirmed by the database.')
+  },
+
+  /** Restores a soft-removed archived assessment without touching its history. */
+  async restoreAssessment(id: string): Promise<void> {
+    if (!isUuid(id)) throw new Error('Invalid assessment ID.')
+    const { data, error } = await supabase.rpc('restore_assessment_to_library_v1', { p_assessment_id: id })
+    if (error) throw error
+    if (data !== true) throw new Error('Assessment restoration was not confirmed.')
+  },
+
+  /** Read-only, organization-scoped deletion preview. */
+  async getDeletionImpact(id: string): Promise<AssessmentDeletionImpact> {
+    if (!isUuid(id)) throw new Error('Invalid assessment ID.')
+    const {data,error}=await supabase.rpc('assessment_deletion_impact_v1',{p_assessment_id:id})
+    if(error) throw error
+    if(!data || data.assessment_id!==id || !Array.isArray(data.blockers))
+      throw new Error('Invalid deletion preview received from server.')
+    return data as AssessmentDeletionImpact
+  },
+
+  /** Transactional server deletion; never operates on Question Bank or taxonomy. */
+  async permanentlyDeleteAssessment(id:string, exactName:string, deleteAttempts:boolean):Promise<{deleted_attempts:number;deleted_versions:number}> {
+    if(!isUuid(id)) throw new Error('Invalid assessment ID.')
+    const {data,error}=await supabase.rpc('permanently_delete_assessment_v2',{
+      p_assessment_id:id,p_confirm_name:exactName,p_delete_attempts:deleteAttempts
+    })
+    if(error) throw error
+    if(data?.deleted!==true || data?.assessment_id!==id) throw new Error('Server did not confirm deletion.')
+    try { this.saveStoredAssessments(this.getStoredAssessments().filter((a)=>a.id!==id)) } catch { /* Database deletion is authoritative. */ }
+    return {deleted_attempts:Number(data.deleted_attempts)||0,deleted_versions:Number(data.deleted_versions)||0}
+  },
+
+  /** Only succeeds for archived assessments with no linked attempts/dependencies. */
+  async permanentlyDeleteUnusedAssessment(id: string): Promise<void> {
+    if (!isUuid(id)) throw new Error('Invalid assessment ID.')
+    const { data, error } = await supabase.rpc('permanently_delete_unused_assessment_v1', { p_assessment_id: id })
+    if (error) throw error
+    if (data !== true) throw new Error('Permanent deletion was not confirmed.')
+    this.saveStoredAssessments(this.getStoredAssessments().filter((a) => a.id !== id))
   },
 
   /**
    * Fetch all assessments from database without any programmatic seeding
    */
   async fetchAssessmentsFromDatabase(): Promise<Assessment[]> {
-    _hasLoadedFromDatabase = true
     if (!supabase || !isSupabaseConfigured) {
       throw new Error('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
     }
@@ -484,26 +407,52 @@ export const assessmentService = {
       .order('created_at', { ascending: false })
     if (error) throw error
 
-    const mapped: Assessment[] = (data ?? []).map((row: any) => ({
-      id: String(row.id),
-      title: row.title || 'Untitled Assessment',
-      subtitle: '',
-      description: row.description || '',
-      subject: row.subject || 'Mathematics',
-      grade: row.grade || 'Grade 10',
-      instructions: 'Please complete all sections to the best of your ability.',
-      status: (row.is_published ? 'published' : 'draft') as Assessment['status'],
-      attemptsCount: 0,
-      settings: {
-        ...defaultAssessmentSettings,
-        timerMinutes: row.duration_minutes || 60,
-      },
-      sections: Array.isArray(row.sections) ? row.sections : [],
-      createdAt: row.created_at || new Date().toISOString(),
-      updatedAt: row.updated_at || new Date().toISOString(),
-    }))
+    const mapped: Assessment[] = (data ?? [])
+      .map(mapDatabaseAssessment)
+    if (mapped.length > 0) {
+      const taxonomyPairs: [string, string[]][] = await Promise.all(
+        mapped.map(async (assessment): Promise<[string, string[]]> => {
+          const taxonomyIds = await this.fetchAssessmentTaxonomyIds(assessment.id)
+          return [assessment.id, taxonomyIds]
+        })
+      )
+      const taxonomyMap = new Map<string, string[]>(taxonomyPairs)
+      mapped.forEach((assessment) => {
+        assessment.taxonomyIds = taxonomyMap.get(assessment.id) || []
+      })
+    }
+
     _assessmentsCache = mapped
     return _assessmentsCache
+  },
+
+  /**
+   * Fetch one assessment directly by primary key rather than relying on a
+   * potentially incomplete list or an in-memory copy. Returns null only when
+   * Supabase cannot see the row (not found or blocked by SELECT RLS).
+   */
+  async fetchAssessmentById(id: string): Promise<Assessment | null> {
+    if (!supabase || !isSupabaseConfigured) {
+      throw new Error('Supabase is not configured.')
+    }
+    if (!isUuid(id)) throw new Error('Invalid assessment ID.')
+
+    const { data, error } = await supabase
+      .from('assessments')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle()
+    if (error) throw error
+    if (!data) return null
+
+    const assessment = mapDatabaseAssessment(data)
+    assessment.taxonomyIds = await this.fetchAssessmentTaxonomyIds(id)
+
+    // The database is authoritative; retain the verified model for synchronous
+    // section/question editor methods without persisting local-only changes.
+    const others = this.getStoredAssessments().filter((item) => item.id !== id)
+    this.saveStoredAssessments([assessment, ...others])
+    return assessment
   },
 
   /**
@@ -525,30 +474,144 @@ export const assessmentService = {
     return list.find((a) => a.id === id) || null
   },
 
+  /**
+   * Read the generic taxonomy relationships configured for an assessment.
+   * This is intentionally separate from legacy exam_id compatibility.
+   */
+  async fetchAssessmentTaxonomyIds(assessmentId: string): Promise<string[]> {
+    if (!supabase || !isSupabaseConfigured || !assessmentId) return []
+
+    const { data, error } = await supabase
+      .from('assessment_taxonomies')
+      .select('taxonomy_id')
+      .eq('assessment_id', assessmentId)
+      .order('sort_order', { ascending: true })
+
+    if (error) throw error
+    return (data || [])
+      .map((row: any) => String(row.taxonomy_id))
+      .filter(Boolean)
+  },
+
+  /**
+   * Replace the complete generic taxonomy relationship set for an assessment.
+   * An empty array is a valid explicit configuration.
+   */
+  async setAssessmentTaxonomies(assessmentId: string, taxonomyIds: string[]): Promise<void> {
+    if (!supabase || !isSupabaseConfigured) {
+      throw new Error('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
+    }
+    if (!assessmentId) throw new Error('Assessment ID is required.')
+
+    const uniqueTaxonomyIds = Array.from(
+      new Set((taxonomyIds || []).map(String).map((id) => id.trim()).filter(Boolean))
+    )
+
+    const { data: existingRows, error: fetchError } = await supabase
+      .from('assessment_taxonomies')
+      .select('taxonomy_id, is_primary, sort_order')
+      .eq('assessment_id', assessmentId)
+    if (fetchError) throw fetchError
+
+    const desired = new Set(uniqueTaxonomyIds)
+    const existing = new Set((existingRows || []).map((row: { taxonomy_id: string }) => String(row.taxonomy_id)))
+
+    // Insert missing relationships first; a failed insert cannot erase existing links.
+    const toInsert = uniqueTaxonomyIds
+      .filter((id) => !existing.has(id))
+      .map((taxonomyId, index) => ({
+        assessment_id: assessmentId,
+        taxonomy_id: taxonomyId,
+        is_primary: uniqueTaxonomyIds[0] === taxonomyId,
+        sort_order: uniqueTaxonomyIds.indexOf(taxonomyId),
+      }))
+    if (toInsert.length > 0) {
+      const { error } = await supabase.from('assessment_taxonomies').insert(toInsert)
+      if (error) throw error
+    }
+
+    // Reorder and update primary status for retained relationships.
+    for (let index = 0; index < uniqueTaxonomyIds.length; index++) {
+      const taxonomyId = uniqueTaxonomyIds[index]
+      if (!existing.has(taxonomyId)) continue
+      const { error } = await supabase.from('assessment_taxonomies')
+        .update({ is_primary: index === 0, sort_order: index })
+        .eq('assessment_id', assessmentId)
+        .eq('taxonomy_id', taxonomyId)
+      if (error) throw error
+    }
+
+    for (const row of (existingRows || []) as Array<{ taxonomy_id: string }>) {
+      if (desired.has(String(row.taxonomy_id))) continue
+      const { error } = await supabase.from('assessment_taxonomies')
+        .delete()
+        .eq('assessment_id', assessmentId)
+        .eq('taxonomy_id', row.taxonomy_id)
+      if (error) throw error
+    }
+
+  },
+
+  async addAssessmentTaxonomy(assessmentId: string, taxonomyId: string, isPrimary = false): Promise<void> {
+    if (!supabase || !isSupabaseConfigured) {
+      throw new Error('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
+    }
+    if (!assessmentId || !taxonomyId) return
+
+    const existing = await this.fetchAssessmentTaxonomyIds(assessmentId)
+    if (existing.includes(taxonomyId)) return
+
+    const { error } = await supabase
+      .from('assessment_taxonomies')
+      .insert({
+        assessment_id: assessmentId,
+        taxonomy_id: taxonomyId,
+        is_primary: isPrimary || existing.length === 0,
+        sort_order: existing.length,
+      })
+
+    if (error) throw error
+  },
+
+  async removeAssessmentTaxonomy(assessmentId: string, taxonomyId: string): Promise<void> {
+    if (!supabase || !isSupabaseConfigured) {
+      throw new Error('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
+    }
+    if (!assessmentId || !taxonomyId) return
+
+    const { error } = await supabase
+      .from('assessment_taxonomies')
+      .delete()
+      .eq('assessment_id', assessmentId)
+      .eq('taxonomy_id', taxonomyId)
+
+    if (error) throw error
+
+    // If the removed taxonomy was primary, promote the first remaining one.
+    const remaining = await this.fetchAssessmentTaxonomyIds(assessmentId)
+    if (remaining.length > 0) {
+      const { error: promoteError } = await supabase
+        .from('assessment_taxonomies')
+        .update({ is_primary: true })
+        .eq('assessment_id', assessmentId)
+        .eq('taxonomy_id', remaining[0])
+
+      if (promoteError) throw promoteError
+    }
+  },
+
   createAssessment(payload: Partial<Assessment>): Assessment {
     const list = this.getStoredAssessments()
 
-    const newId = payload.id || `assessment-${Date.now().toString(36)}`
-    const bankQuestions = questionBankService.getStoredQuestions()
-    const firstQuestion = bankQuestions[0]
-
-    // Default section with at least 1 question
+    const newId = isUuid(payload.id) ? payload.id : createUuid()
+    // Draft sections may be empty; never manufacture question references.
     const defaultInitialSection: AssessmentSection = {
       id: uid('sec'),
       title: 'Section 1: General',
       description: 'Primary assessment section',
       displayOrder: 0,
       settings: { ...defaultSectionSettings },
-      questions: [
-        {
-          id: uid('sq'),
-          questionId: firstQuestion?.id || 'default-q1',
-          displayOrder: 0,
-          pointsOverride: 1,
-          required: true,
-          questionSnapshot: firstQuestion || undefined,
-        },
-      ],
+      questions: [],
     }
 
     const newAssessment: Assessment = {
@@ -565,24 +628,13 @@ export const assessmentService = {
         ...defaultAssessmentSettings,
         ...(payload.settings || {}),
       },
+      taxonomyIds: Array.isArray(payload.taxonomyIds) ? [...payload.taxonomyIds] : [],
       sections:
         payload.sections && payload.sections.length > 0
           ? payload.sections.map((sec, idx) => ({
               ...sec,
               displayOrder: idx,
-              questions:
-                sec.questions && sec.questions.length > 0
-                  ? sec.questions
-                  : [
-                      {
-                        id: uid('sq'),
-                        questionId: firstQuestion?.id || 'default-q1',
-                        displayOrder: 0,
-                        pointsOverride: 1,
-                        required: true,
-                        questionSnapshot: firstQuestion || undefined,
-                      },
-                    ],
+              questions: sec.questions || [],
             }))
           : [defaultInitialSection],
       createdAt: new Date().toISOString(),
@@ -592,13 +644,16 @@ export const assessmentService = {
     list.unshift(newAssessment)
     this.saveStoredAssessments(list)
 
-    // Sync to database in background
-    this.syncAssessmentToDatabase(newAssessment)
+    // Caller explicitly awaits persistence and handles failures.
 
     return newAssessment
   },
 
-  updateAssessment(id: string, updates: Partial<Assessment>): Assessment {
+  updateAssessment(
+    id: string,
+    updates: Partial<Assessment>,
+    options?: { skipDatabaseSync?: boolean }
+  ): Assessment {
     const list = this.getStoredAssessments()
     const idx = list.findIndex((a) => a.id === id)
     if (idx === -1) {
@@ -622,29 +677,65 @@ export const assessmentService = {
       throw new Error('An assessment must have at least one section.')
     }
 
-    // Ensure each section has at least 1 question
-    for (const sec of updated.sections) {
-      if (!sec.questions || sec.questions.length === 0) {
-        throw new Error(`Section "${sec.title}" must have at least one question.`)
+    // Draft assessments may temporarily contain empty sections while the
+    // assessment is being authored. Published assessments are validated at
+    // the delivery boundary.
+    if (updated.status === 'published') {
+      for (const sec of updated.sections) {
+        if (!sec.questions || sec.questions.length === 0) {
+          throw new Error(`Cannot publish assessment: section "${sec.title}" must have at least one question.`)
+        }
       }
     }
 
     list[idx] = updated
     this.saveStoredAssessments(list)
 
-    // Sync to database in background
-    this.syncAssessmentToDatabase(updated)
+    // This is a synchronous in-memory editor mutation only. Callers must await
+    // syncAssessmentToDatabase(updated) before reporting successful persistence.
+    // skipDatabaseSync is retained for backward compatibility.
+    void options
 
     return updated
   },
 
-  deleteAssessment(id: string): void {
-    const list = this.getStoredAssessments()
-    const filtered = list.filter((a) => a.id !== id)
-    this.saveStoredAssessments(filtered)
+  async publishAssessment(assessmentId: string): Promise<Assessment> {
+    if (!supabase || !isSupabaseConfigured) {
+      throw new Error('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY.')
+    }
+    if (!assessmentId) throw new Error('Assessment ID is required.')
 
-    // Delete from database in background
-    this.deleteAssessmentFromDatabase(id)
+    const assessment = this.getAssessmentById(assessmentId)
+    if (!assessment) throw new Error('Assessment not found.')
+
+    for (const sec of assessment.sections) {
+      if (!sec.questions || sec.questions.length === 0) {
+        throw new Error(`Cannot publish assessment: section "${sec.title}" must have at least one question.`)
+      }
+    }
+
+    // Persist the complete assessment first, then mark it published. This keeps
+    // the database and the local editor model aligned without relying on any
+    // obsolete top-level assessment columns.
+    const updated: Assessment = {
+      ...assessment,
+      status: 'published',
+      updatedAt: new Date().toISOString(),
+    }
+
+    await this.syncAssessmentToDatabase(updated)
+    this.saveStoredAssessments(
+      this.getStoredAssessments().map((item) =>
+        item.id === assessmentId ? updated : item
+      )
+    )
+
+    return updated
+  },
+
+  async deleteAssessment(id: string): Promise<void> {
+    await this.deleteAssessmentFromDatabase(id)
+    this.saveStoredAssessments(this.getStoredAssessments().filter((a) => a.id !== id))
   },
 
   duplicateAssessment(id: string): Assessment {
@@ -675,9 +766,10 @@ export const assessmentService = {
     const uniqueSuffix = `${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`
     const cloned: Assessment = {
       ...JSON.parse(JSON.stringify(orig)),
-      id: `assessment_${uniqueSuffix}`,
+      id: createUuid(),
       title: newTitle,
       status: 'draft',
+      removedFromLibrary: false,
       attemptsCount: 0,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -702,13 +794,42 @@ export const assessmentService = {
     list.unshift(cloned)
     this.saveStoredAssessments(list)
 
-    // Persist to database immediately
-    this.syncAssessmentToDatabase(cloned)
+    // Caller explicitly awaits persistence before reporting success.
 
     return cloned
   },
 
-  duplicateSection(assessmentId: string, sectionId: string): Assessment {
+  /** Duplicate a database-visible assessment and verify the new record before navigating. */
+  async duplicateAssessmentAndPersist(id: string): Promise<Assessment> {
+    const source = await this.fetchAssessmentById(id)
+    if (!source) {
+      throw new Error(
+        `Cannot duplicate assessment ${id}: the source record is not readable in Supabase.`
+      )
+    }
+
+    const clone = this.duplicateAssessment(source.id)
+    try {
+      await this.syncAssessmentToDatabase(clone)
+      const persisted = await this.fetchAssessmentById(clone.id)
+      if (!persisted) {
+        throw new Error(
+          `The duplicated assessment ${clone.id} is not readable after saving. ` +
+          'Check the assessments RLS SELECT policy for draft assessments.'
+        )
+      }
+      return persisted
+    } catch (error) {
+      // Roll back only the transient editor entry, not database records: an
+      // earlier DB operation might already have succeeded.
+      this.saveStoredAssessments(
+        this.getStoredAssessments().filter((item) => item.id !== clone.id)
+      )
+      throw error
+    }
+  },
+
+  duplicateSection(assessmentId: string, sectionId: string, options?: { skipDatabaseSync?: boolean }): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
 
@@ -736,10 +857,10 @@ export const assessmentService = {
       s.displayOrder = idx
     })
 
-    return this.updateAssessment(assessmentId, { sections: updatedSections })
+    return this.updateAssessment(assessmentId, { sections: updatedSections }, options)
   },
 
-  duplicateQuestion(assessmentId: string, sectionId: string, questionItemId: string): Assessment {
+  duplicateQuestion(assessmentId: string, sectionId: string, questionItemId: string, options?: { skipDatabaseSync?: boolean }): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
 
@@ -771,16 +892,13 @@ export const assessmentService = {
       questions: updatedQuestions,
     }
 
-    return this.updateAssessment(assessmentId, { sections: updatedSections })
+    return this.updateAssessment(assessmentId, { sections: updatedSections }, options)
   },
 
   // Section Management
-  addSection(assessmentId: string, sectionPayload?: Partial<AssessmentSection>): Assessment {
+  addSection(assessmentId: string, sectionPayload?: Partial<AssessmentSection>, options?: { skipDatabaseSync?: boolean }): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
-
-    const bankQuestions = questionBankService.getStoredQuestions()
-    const sampleQuestion = bankQuestions[0]
 
     const newSection: AssessmentSection = {
       id: uid('sec'),
@@ -791,29 +909,18 @@ export const assessmentService = {
         ...defaultSectionSettings,
         ...(sectionPayload?.settings || {}),
       },
-      questions:
-        sectionPayload?.questions && sectionPayload.questions.length > 0
-          ? sectionPayload.questions
-          : [
-              {
-                id: uid('sq'),
-                questionId: sampleQuestion?.id || 'sample-q',
-                displayOrder: 0,
-                pointsOverride: 1,
-                required: true,
-                questionSnapshot: sampleQuestion || undefined,
-              },
-            ],
+      questions: sectionPayload?.questions || [],
     }
 
     const updatedSections = [...assessment.sections, newSection]
-    return this.updateAssessment(assessmentId, { sections: updatedSections })
+    return this.updateAssessment(assessmentId, { sections: updatedSections }, options)
   },
 
   updateSection(
     assessmentId: string,
     sectionId: string,
-    updates: Partial<AssessmentSection>
+    updates: Partial<AssessmentSection>,
+    options?: { skipDatabaseSync?: boolean }
   ): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
@@ -831,10 +938,10 @@ export const assessmentService = {
       }
     })
 
-    return this.updateAssessment(assessmentId, { sections: updatedSections })
+    return this.updateAssessment(assessmentId, { sections: updatedSections }, options)
   },
 
-  deleteSection(assessmentId: string, sectionId: string): Assessment {
+  deleteSection(assessmentId: string, sectionId: string, options?: { skipDatabaseSync?: boolean }): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
 
@@ -846,14 +953,16 @@ export const assessmentService = {
       .filter((sec) => sec.id !== sectionId)
       .map((sec, idx) => ({ ...sec, displayOrder: idx }))
 
-    return this.updateAssessment(assessmentId, { sections: updatedSections })
+    return this.updateAssessment(assessmentId, { sections: updatedSections }, options)
   },
 
-  reorderSections(assessmentId: string, sectionIds: string[]): Assessment {
+  reorderSections(assessmentId: string, sectionIds: string[], options?: { skipDatabaseSync?: boolean }): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
 
-    const map = new Map(assessment.sections.map((s) => [s.id, s]))
+    const map = new Map<string, AssessmentSection>(
+      assessment.sections.map((s): [string, AssessmentSection] => [s.id, s])
+    )
     const reordered: AssessmentSection[] = []
 
     sectionIds.forEach((id, idx) => {
@@ -870,14 +979,15 @@ export const assessmentService = {
       }
     })
 
-    return this.updateAssessment(assessmentId, { sections: reordered })
+    return this.updateAssessment(assessmentId, { sections: reordered }, options)
   },
 
   // Questions within Section Management
   addQuestionsToSection(
     assessmentId: string,
     sectionId: string,
-    questionIds: string[]
+    questionIds: string[],
+    options?: { skipDatabaseSync?: boolean }
   ): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
@@ -911,13 +1021,14 @@ export const assessmentService = {
       }
     })
 
-    return this.updateAssessment(assessmentId, { sections: updatedSections })
+    return this.updateAssessment(assessmentId, { sections: updatedSections }, options)
   },
 
   removeQuestionFromSection(
     assessmentId: string,
     sectionId: string,
-    sectionQuestionId: string
+    sectionQuestionId: string,
+    options?: { skipDatabaseSync?: boolean }
   ): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
@@ -925,8 +1036,8 @@ export const assessmentService = {
     const targetSection = assessment.sections.find((s) => s.id === sectionId)
     if (!targetSection) throw new Error('Section not found.')
 
-    if (targetSection.questions.length <= 1) {
-      throw new Error('Each section must have at least 1 question.')
+    if (assessment.status === 'published' && targetSection.questions.length <= 1) {
+      throw new Error('A published section must have at least 1 question.')
     }
 
     const updatedSections = assessment.sections.map((sec) => {
@@ -942,13 +1053,14 @@ export const assessmentService = {
       }
     })
 
-    return this.updateAssessment(assessmentId, { sections: updatedSections })
+    return this.updateAssessment(assessmentId, { sections: updatedSections }, options)
   },
 
   reorderSectionQuestions(
     assessmentId: string,
     sectionId: string,
-    questionItemIds: string[]
+    questionItemIds: string[],
+    options?: { skipDatabaseSync?: boolean }
   ): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
@@ -956,7 +1068,9 @@ export const assessmentService = {
     const updatedSections = assessment.sections.map((sec) => {
       if (sec.id !== sectionId) return sec
 
-      const qMap = new Map(sec.questions.map((q) => [q.id, q]))
+      const qMap = new Map<string, SectionQuestionItem>(
+        sec.questions.map((q): [string, SectionQuestionItem] => [q.id, q])
+      )
       const reordered: SectionQuestionItem[] = []
 
       questionItemIds.forEach((id, idx) => {
@@ -972,14 +1086,15 @@ export const assessmentService = {
       }
     })
 
-    return this.updateAssessment(assessmentId, { sections: updatedSections })
+    return this.updateAssessment(assessmentId, { sections: updatedSections }, options)
   },
 
   updateSectionQuestion(
     assessmentId: string,
     sectionId: string,
     questionItemId: string,
-    updates: Partial<SectionQuestionItem>
+    updates: Partial<SectionQuestionItem>,
+    options?: { skipDatabaseSync?: boolean }
   ): Assessment {
     const assessment = this.getAssessmentById(assessmentId)
     if (!assessment) throw new Error('Assessment not found.')
@@ -998,7 +1113,7 @@ export const assessmentService = {
       }
     })
 
-    return this.updateAssessment(assessmentId, { sections: updatedSections })
+    return this.updateAssessment(assessmentId, { sections: updatedSections }, options)
   },
 
   exportAssessmentJSON(id: string): string {
@@ -1015,7 +1130,7 @@ export const assessmentService = {
 
     const imported: Partial<Assessment> = {
       ...parsed,
-      id: `imported-${Date.now().toString(36)}`,
+      id: createUuid(),
       title: `${parsed.title} (Imported)`,
       status: 'draft',
       attemptsCount: 0,

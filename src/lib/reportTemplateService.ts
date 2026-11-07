@@ -53,6 +53,7 @@ export type ReportSectionId =
 export type ReportRuleMetric =
   | 'grade'
   | 'score'
+  | 'practiceScaledScore'
   | 'totalTimeMinutes'
   | 'avgTimeSeconds'
   | 'questionCount'
@@ -155,6 +156,23 @@ export const REPORT_SECTION_DISPLAY_FIELDS: Record<ReportSectionId, Array<{ id: 
   ],
 }
 
+export type FeedbackMetric = 'percentage' | 'practiceScaledScore' | 'correctCount' | 'incorrectCount' | 'unansweredCount'
+export type FeedbackOperator = 'gte' | 'lte' | 'eq'
+export interface FeedbackCriterion {
+  metric: FeedbackMetric
+  operator: FeedbackOperator
+  value: number
+}
+export interface FeedbackRule {
+  id: string
+  title: string
+  enabled: boolean
+  criteria: FeedbackCriterion[]
+  match: 'all' | 'any'
+  message: string
+  recommendation: string
+}
+
 export interface ReportTemplateConfig {
   id: string
   assessmentId?: string // undefined or 'global' means default for all assessments
@@ -183,6 +201,7 @@ export interface ReportTemplateConfig {
 
   // Rubric Tiers
   rubricTiers: RubricTier[]
+  feedbackRules?: FeedbackRule[]
 
   // Custom diagnostic notes or instructions
   customNotesTitle?: string
@@ -219,6 +238,7 @@ function normalizeReportTemplate(parsed: Partial<ReportTemplateConfig>): ReportT
         ...(parsed.domainRubricCopy?.weak || {}),
       },
     },
+    feedbackRules: Array.isArray(parsed.feedbackRules) ? parsed.feedbackRules : [],
     sectionRules: {
       ...DEFAULT_GLOBAL_REPORT_TEMPLATE.sectionRules,
       ...(parsed.sectionRules || {}),
@@ -271,6 +291,7 @@ export const DEFAULT_REPORT_RUBRIC_TIERS: RubricTier[] = [
 
 export const DEFAULT_GLOBAL_REPORT_TEMPLATE: ReportTemplateConfig = {
   id: 'global-template',
+  feedbackRules: [],
   title: 'Diagnostic Performance Assessment',
   subtitle: 'Comprehensive Mathematics Diagnostic Evaluation',
   headerBannerText: 'Student Diagnostic Evaluation',
@@ -319,7 +340,6 @@ export const DEFAULT_GLOBAL_REPORT_TEMPLATE: ReportTemplateConfig = {
 }
 
 const _templatesMap = new Map<string, ReportTemplateConfig>()
-let _hasLoadedGlobalTemplate = false
 
 // Clear any old browser storage
 if (typeof window !== 'undefined') {
@@ -338,10 +358,9 @@ export const reportTemplateService = {
       return _templatesMap.get('global')!
     }
 
-    if (!_hasLoadedGlobalTemplate && typeof window !== 'undefined') {
-      this.loadTemplateForAssessment(assessmentId).catch(() => {})
-    }
-
+    // Pure synchronous cache read. Never launch a Supabase request from a
+    // render-time getter: public students cannot read staff organization config,
+    // and a rejected request previously retriggered an unbounded retry loop.
     return normalizeReportTemplate(DEFAULT_GLOBAL_REPORT_TEMPLATE)
   },
 
@@ -371,6 +390,8 @@ export const reportTemplateService = {
       console.warn('Failed to load report template from Supabase:', e)
     }
 
+    // Missing config (or unavailable staff credentials) is a valid fallback.
+    // Never call the async loader again from its own fallback path.
     return this.getTemplateForAssessment(assessmentId)
   },
 

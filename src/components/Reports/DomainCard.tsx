@@ -4,9 +4,10 @@ interface DomainCardProps {
   domain: DomainPerformance
   type: 'strong' | 'moderate' | 'weak'
   visibleFields?: string[]
+  hideRawCounts?: boolean
 }
 
-export default function DomainCard({ domain, type, visibleFields }: DomainCardProps) {
+export default function DomainCard({ domain, type, visibleFields, hideRawCounts = false }: DomainCardProps) {
   const isStrong = type === 'strong'
   const isModerate = type === 'moderate'
   const isWeak = type === 'weak'
@@ -41,7 +42,7 @@ export default function DomainCard({ domain, type, visibleFields }: DomainCardPr
           {isFieldVisible('domainName') && <h3 className="mt-1.5 text-base font-semibold text-slate-900 break-words">{domain.domainName}</h3>}
         </div>
 
-        {(isFieldVisible('accuracy') || isFieldVisible('answerCount')) && <div className="text-right shrink-0">
+        {(isFieldVisible('accuracy') || (!hideRawCounts && isFieldVisible('answerCount'))) && <div className="text-right shrink-0">
           {isFieldVisible('accuracy') && <div
             className={`text-2xl font-bold tracking-tight ${
               isStrong ? 'text-emerald-600' : isModerate ? 'text-amber-600' : 'text-rose-600'
@@ -49,7 +50,7 @@ export default function DomainCard({ domain, type, visibleFields }: DomainCardPr
           >
             {domain.accuracyPct}%
           </div>}
-          {isFieldVisible('answerCount') && (
+          {(!hideRawCounts && isFieldVisible('answerCount')) && (
             <div className="text-xs text-slate-500 font-medium">
               {domain.correct} / {domain.total} correct
             </div>
@@ -67,21 +68,13 @@ export default function DomainCard({ domain, type, visibleFields }: DomainCardPr
         />
       </div>}
 
-      {/* Verbosity-Level-2 Explanation: 2 Sentences */}
-      {(isFieldVisible('explanation') || isFieldVisible('criterion')) && <div className="mt-4 space-y-1.5 rounded-xl bg-white/80 p-3.5 border border-slate-100 text-xs sm:text-sm">
-        {isFieldVisible('criterion') && (
-          <p className="font-semibold text-slate-700">Rubric criterion: {domain.classificationCriteria}</p>
-        )}
-        {isFieldVisible('explanation') && (
-          <>
-            <p className="font-medium text-slate-800 leading-relaxed">
-              {domain.performanceFact}
-            </p>
-            <p className="text-slate-600 leading-relaxed">
-              {domain.actionableInsight}
-            </p>
-          </>
-        )}
+      {/* Explain the outcome and next step in student-friendly language.
+          Rubric configuration and technical criterion text remain in the teacher editor. */}
+      {isFieldVisible('explanation') && <div className="mt-4 space-y-1.5 rounded-xl bg-white/85 p-3.5 border border-slate-100 text-xs sm:text-sm">
+        <p className="font-medium text-slate-800 leading-relaxed">
+          {hideRawCounts ? `${domain.domainName} is in the ${domain.classification.toLowerCase()} diagnostic mastery band.` : domain.performanceFact}
+        </p>
+        <p className="text-slate-600 leading-relaxed">{domain.actionableInsight}</p>
       </div>}
 
       {/* Footer Metrics */}
@@ -90,7 +83,7 @@ export default function DomainCard({ domain, type, visibleFields }: DomainCardPr
         {isFieldVisible('averageTime') && (
         <span className="inline-flex items-center gap-1 font-medium">
           <span className="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
-          Avg Pace: <strong className="text-slate-700">{domain.avgTimeSec}s</strong> / question
+          Avg Pace: <strong className="text-slate-700">{domain.avgTimeSec > 0 ? `${domain.avgTimeSec}s` : 'Not recorded'}</strong>{domain.avgTimeSec > 0 ? ' / question' : ''}
         </span>
         )}
         {domain.unanswered > 0 && isFieldVisible('unanswered') && (

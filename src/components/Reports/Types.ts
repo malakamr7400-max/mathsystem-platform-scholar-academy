@@ -1,3 +1,4 @@
+import type { SavedScoringResult } from '../../lib/scoringSchemes'
 import type { ContentBlock } from '../ContentBlockRenderer'
 
 export type TaxonomyType = 'module' | 'category' | 'chapter' | 'lesson' | 'skill' | 'difficulty'
@@ -8,12 +9,16 @@ export interface ChoiceOption {
   id: string
   content_blocks: ContentBlock[]
   is_correct: boolean
+  /** Author-provided explanation for this option, when included in saved report data. */
+  rationale?: string
 }
 
 export interface QuestionReviewItem {
   question_id: string
   content_blocks: ContentBlock[]
   explanation_blocks: ContentBlock[]
+  /** Author-provided general misconception note, when included in saved report data. */
+  common_misconception?: string
   difficulty: 'easy' | 'medium' | 'hard'
   answer_type_code: string
   points_possible: number
@@ -127,6 +132,8 @@ export interface OrgSettings {
 }
 
 export interface ReportData {
+  /** Pinned, server-computed at submission; absent on historical reports. */
+  scoring?: SavedScoringResult
   student_info: StudentInfo
   overall: OverallResult
   diagnostic_notes?: Array<{ type: string; title: string; body: string }>

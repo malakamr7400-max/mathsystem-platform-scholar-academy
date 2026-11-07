@@ -1,7 +1,25 @@
-import React, { useState, useEffect, type ReactNode } from 'react'
+
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
+import {
+  ArrowLeft,
+  BarChart3,
+  LayoutTemplate,
+  BookOpenText,
+  ClipboardList,
+  GraduationCap,
+  Layers3,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  Network,
+  Settings2,
+  Sparkles,
+  Workflow,
+  X,
+  type LucideIcon,
+} from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
-import { ArrowLeft, Menu, X } from 'lucide-react'
 import { recordNavigation, navigateBack } from '../lib/navigationHistory'
 
 interface AdminLayoutProps {
@@ -11,6 +29,50 @@ interface AdminLayoutProps {
   actions?: ReactNode
   showBackButton?: boolean
   backButtonPath?: string
+}
+
+interface NavItem {
+  label: string
+  path: string
+  icon: LucideIcon
+}
+
+const navigation: { title: string; items: NavItem[] }[] = [
+  {
+    title: 'Workspace',
+    items: [
+      { label: 'Dashboard', path: '/admin', icon: LayoutDashboard },
+      { label: 'Assessments', path: '/admin/assessments', icon: ClipboardList },
+      { label: 'Question Bank', path: '/admin/questions', icon: BookOpenText },
+    ],
+  },
+  {
+    title: 'Teaching',
+    items: [
+      { label: 'Topics & Skills', path: '/admin/taxonomy', icon: Network },
+      { label: 'Levels & Courses', path: '/admin/levels', icon: GraduationCap },
+      { label: 'Evaluation Settings', path: '/admin/evaluation-profiles', icon: Layers3 },
+    ],
+  },
+  {
+    title: 'Reports & plans',
+    items: [
+      { label: 'Student Surveys', path: '/admin/survey-action-plans', icon: Sparkles },
+      { label: 'Learning Plans', path: '/admin/action-plans', icon: Workflow },
+      { label: 'Report Studio', path: '/admin/report-studio', icon: LayoutTemplate },
+      { label: 'Scoring & Criteria', path: '/admin/report-settings', icon: BarChart3 },
+    ],
+  },
+  {
+    title: 'Settings',
+    items: [{ label: 'Workspace Settings', path: '/admin/settings', icon: Settings2 }],
+  },
+]
+
+function isNavActive(current: string, target: string): boolean {
+  if (target === '/admin') return current === target
+  if (target === '/admin/action-plans') return current === target
+  return current === target || current.startsWith(`${target}/`)
 }
 
 export default function AdminLayout({
@@ -26,217 +88,185 @@ export default function AdminLayout({
   const navigate = useNavigate()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
-  // Continuously record route transitions for reliable backward navigation
   useEffect(() => {
     recordNavigation(location.pathname)
-  }, [location.pathname])
-
-  // Close mobile drawer on route change
-  useEffect(() => {
     setMobileMenuOpen(false)
   }, [location.pathname])
 
-  const navItems = [
-    { label: 'Dashboard', path: '/admin', icon: '📊' },
-    { label: 'Assessments', path: '/admin/assessments', icon: '📝' },
-    { label: 'Question Bank', path: '/admin/questions', icon: '🗂️' },
-    { label: 'Taxonomy', path: '/admin/taxonomy', icon: '🏷️' },
-    { label: 'Levels & Courses', path: '/admin/levels', icon: '🎯' },
-    { label: 'Survey & Action Plans', path: '/admin/survey-action-plans', icon: '✨' },
-    { label: 'Report & Rubric Builder', path: '/admin/report-settings', icon: '📋' },
-    { label: 'Settings & Fields', path: '/admin/settings', icon: '⚙️' },
-  ]
+  useEffect(() => {
+    if (!mobileMenuOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileMenuOpen(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [mobileMenuOpen])
 
-  const isActive = (path: string) => {
-    if (path === '/admin') return location.pathname === '/admin'
-    return location.pathname.startsWith(path)
-  }
+  // Keep keyboard focus inside the open mobile navigation and restore it on close.
+  useEffect(() => {
+    if (!mobileMenuOpen) return
+    const dialog = document.getElementById('mobile-workspace-navigation')
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusable = () => Array.from(dialog?.querySelectorAll<HTMLElement>('a[href], button:not([disabled])') ?? [])
+    focusable()[0]?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      const items = focusable()
+      if (!items.length) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      previouslyFocused?.focus()
+    }
+  }, [mobileMenuOpen])
 
-  const shouldShowBack = showBackButton !== undefined ? showBackButton : location.pathname !== '/admin'
+  const shouldShowBack = showBackButton ?? location.pathname !== '/admin'
+  const userDisplayName = profile?.full_name || session?.user?.email?.split('@')[0] || 'Staff member'
+  const userRole = profile?.role?.trim() || 'Staff'
+  const userInitial = userDisplayName.charAt(0).toUpperCase()
 
-  const handleBack = () => {
-    navigateBack(navigate, location.pathname, backButtonPath)
-  }
+  const handleBack = () => navigateBack(navigate, location.pathname, backButtonPath)
 
-  const userDisplayName =
-    profile?.full_name || session?.user?.email?.split('@')[0] || 'malakamr7400'
+  const navigationContent = (mobile: boolean) => (
+    <nav aria-label={mobile ? 'Mobile workspace navigation' : 'Workspace navigation'} className="ms-sidebar-nav min-h-0 flex-1 space-y-6 overflow-y-auto px-3 py-5">
+      {navigation.map((group) => (
+        <div key={group.title}>
+          <p className="ms-sidebar-section mb-2 px-3 text-[10px] font-semibold uppercase tracking-[0.16em]">{group.title}</p>
+          <div className="space-y-0.5">
+            {group.items.map(({ label, path, icon: Icon }) => {
+              const active = isNavActive(location.pathname, path)
+              return (
+                <Link
+                  key={path}
+                  to={path}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={mobile ? () => setMobileMenuOpen(false) : undefined}
+                  className={`ms-sidebar-link group flex min-h-11 items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-medium transition-colors ${active ? 'ms-sidebar-link-active font-semibold' : ''}`}
+                >
+                  <Icon className="h-[18px] w-[18px] shrink-0" strokeWidth={active ? 2.2 : 1.8} aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{label}</span>
+                  {active && <span className="ms-active-marker h-1.5 w-1.5 shrink-0 rounded-full" aria-hidden="true" />}
+                </Link>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+    </nav>
+  )
+
+  const accountContent = () => (
+    <div className="ms-sidebar-account border-t p-4">
+      <div className="ms-sidebar-account-inner flex items-center gap-3 rounded-xl px-3 py-3">
+        <div className="ms-sidebar-avatar flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-sm font-bold" aria-hidden="true">{userInitial}</div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-xs font-semibold text-white" title={userDisplayName}>{userDisplayName}</p>
+          <p className="ms-sidebar-role mt-0.5 text-[11px] capitalize">{userRole}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => { void signOut() }}
+          title="Sign out"
+          aria-label="Sign out of the workspace"
+          className="ms-sidebar-signout rounded-lg p-2 transition"
+        >
+          <LogOut className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  )
+
+  const brandContent = () => (
+    <Link to="/admin" className="ms-sidebar-brand flex items-center gap-3 border-b px-5 py-6" aria-label="MathSystem teacher dashboard">
+      <div className="ms-sidebar-logo flex h-11 w-11 shrink-0 items-center justify-center rounded-[14px] text-white">
+        <GraduationCap className="h-6 w-6" strokeWidth={2} />
+      </div>
+      <div className="min-w-0">
+        <p className="truncate text-[16px] font-bold tracking-[-0.025em] text-white">MathSystem</p>
+        <p className="ms-sidebar-brand-caption mt-0.5 text-[11px] font-medium">Educator platform</p>
+      </div>
+    </Link>
+  )
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] flex text-slate-900 font-sans relative">
-      {/* 1. Permanent Desktop Sidebar */}
-      <aside className="hidden md:flex flex-col w-64 bg-white border-r border-slate-200 min-h-screen sticky top-0 h-screen shrink-0 select-none z-30">
-        {/* Top Brand Header */}
-        <div className="p-5 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-lg shadow-xs shrink-0">
-            A
-          </div>
-          <div className="min-w-0">
-            <h1 className="font-bold text-slate-900 text-sm leading-tight tracking-tight">
-              Assessment Studio
-            </h1>
-            <p className="text-xs text-slate-500 font-normal">Diagnostic &amp; Testing</p>
-          </div>
-        </div>
-
-        {/* Navigation Links */}
-        <nav className="px-3 py-2 space-y-1 flex-1 overflow-y-auto">
-          {navItems.map((item) => {
-            const active = isActive(item.path)
-            return (
-              <Link
-                key={item.path}
-                to={item.path}
-                className={`flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm transition ${
-                  active
-                    ? 'bg-blue-50/70 text-slate-900 font-semibold'
-                    : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900 font-medium'
-                }`}
-              >
-                <span className="text-base shrink-0">{item.icon}</span>
-                <span>{item.label}</span>
-              </Link>
-            )
-          })}
-        </nav>
-
-        {/* Bottom User Account & Sign Out */}
-        <div className="p-4 border-t border-slate-100 flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <p className="text-xs font-semibold text-slate-800 truncate">{userDisplayName}</p>
-            <p className="text-[10px] text-slate-400 font-bold tracking-wider uppercase">
-              {profile?.role || 'ADMIN'}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => signOut()}
-            className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition shrink-0 cursor-pointer"
-          >
-            Sign out
-          </button>
-        </div>
+    <div className="ms-admin-shell relative flex min-h-screen font-sans text-slate-900">
+      <a href="#workspace-content" className="ms-skip-link">Skip to main content</a>
+      <aside className="ms-admin-sidebar sticky top-0 z-30 hidden h-screen w-[280px] shrink-0 flex-col lg:flex">
+        {brandContent()}
+        {navigationContent(false)}
+        {accountContent()}
       </aside>
 
-      {/* 2. Mobile Header Bar & Drawer Toggle */}
-      <div className="md:hidden fixed top-0 left-0 right-0 h-14 bg-white border-b border-slate-200 z-40 px-4 flex items-center justify-between">
+      <div className="fixed inset-x-0 top-0 z-40 flex h-16 items-center justify-between border-b border-slate-200 bg-white px-4 shadow-sm lg:hidden">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold text-sm">
-            A
-          </div>
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-600 text-white"><GraduationCap className="h-5 w-5" /></div>
           <div>
-            <h1 className="font-bold text-slate-900 text-xs leading-tight">Assessment Studio</h1>
-            <p className="text-[10px] text-slate-500">Diagnostic &amp; Testing</p>
+            <p className="text-sm font-extrabold tracking-tight text-slate-950">MathSystem</p>
+            <p className="text-[10px] text-slate-500">Teacher workspace</p>
           </div>
         </div>
         <button
           type="button"
-          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-          className="p-2 text-slate-600 hover:text-slate-900 rounded-lg"
-          aria-label="Toggle Navigation"
+          onClick={() => setMobileMenuOpen((open) => !open)}
+          aria-label={mobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+          aria-controls="mobile-workspace-navigation"
+          aria-expanded={mobileMenuOpen}
+          className="rounded-xl border border-slate-200 p-2.5 text-slate-700 hover:bg-slate-50"
         >
           {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
       </div>
 
-      {/* Mobile Drawer Menu */}
       {mobileMenuOpen && (
-        <div
-          className="md:hidden fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex"
-          onClick={() => setMobileMenuOpen(false)}
-        >
-          <div
-            className="w-72 bg-white h-full shadow-2xl flex flex-col p-4 space-y-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-sm">
-                  A
-                </div>
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900">Assessment Studio</h2>
-                  <p className="text-xs text-slate-500">Diagnostic &amp; Testing</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setMobileMenuOpen(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg"
-              >
-                <X className="h-5 w-5" />
-              </button>
+        <div className="fixed inset-0 z-50 flex bg-slate-950/45 lg:hidden">
+          <button type="button" className="absolute inset-0 cursor-default" onClick={() => setMobileMenuOpen(false)} aria-label="Close navigation overlay" />
+          <aside id="mobile-workspace-navigation" role="dialog" aria-modal="true" aria-label="Workspace navigation" className="ms-admin-sidebar relative flex h-full w-[min(85vw,310px)] flex-col shadow-2xl">
+            <div className="ms-sidebar-mobile-head flex items-center justify-between border-b">
+              {brandContent()}
+              <button type="button" onClick={() => setMobileMenuOpen(false)} aria-label="Close menu" className="ms-sidebar-signout mr-3 rounded-lg p-2"><X className="h-5 w-5" /></button>
             </div>
-
-            <nav className="space-y-1 flex-1 overflow-y-auto">
-              {navItems.map((item) => {
-                const active = isActive(item.path)
-                return (
-                  <Link
-                    key={item.path}
-                    to={item.path}
-                    className={`flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition ${
-                      active
-                        ? 'bg-blue-50 text-blue-700 border border-blue-100'
-                        : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
-                    }`}
-                  >
-                    <span>{item.icon}</span>
-                    <span>{item.label}</span>
-                  </Link>
-                )
-              })}
-            </nav>
-
-            <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
-              <div>
-                <p className="text-xs font-semibold text-slate-800">{userDisplayName}</p>
-                <p className="text-[10px] text-slate-400 font-bold uppercase">
-                  {profile?.role || 'ADMIN'}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => signOut()}
-                className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
-              >
-                Sign out
-              </button>
-            </div>
-          </div>
+            {navigationContent(true)}
+            {accountContent()}
+          </aside>
         </div>
       )}
 
-      {/* 3. Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 md:pt-0 pt-14 transition-all duration-300 overflow-x-hidden">
-        {/* Top Header Bar for subpages that specify title or actions */}
+      <div className="flex min-w-0 flex-1 flex-col pt-16 lg:pt-0">
         {(title || actions || shouldShowBack) && (
-          <header className="bg-white/95 backdrop-blur-xs border-b border-slate-200 px-4 sm:px-6 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 sticky top-0 z-20 shadow-2xs min-w-0">
-            <div className="flex items-center gap-3 min-w-0 flex-1">
+          <header className="ms-admin-header sticky top-16 z-20 flex min-w-0 flex-col gap-3 border-b bg-white/95 px-4 py-5 backdrop-blur-sm sm:flex-row sm:items-center sm:justify-between sm:px-7 lg:top-0">
+            <div className="flex min-w-0 flex-1 items-center gap-3">
               {shouldShowBack && (
                 <button
                   type="button"
                   onClick={handleBack}
-                  title="Go to previous page"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-100 hover:border-slate-300 hover:text-blue-600 transition shadow-2xs shrink-0 cursor-pointer"
+                  aria-label="Go back"
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
                 >
-                  <ArrowLeft className="h-3.5 w-3.5" />
-                  <span className="hidden xs:inline">Back</span>
+                  <ArrowLeft className="h-4 w-4" /> <span className="hidden sm:inline">Back</span>
                 </button>
               )}
-
               <div className="min-w-0 flex-1">
-                {title && <h1 className="text-lg sm:text-xl font-bold text-slate-900 truncate">{title}</h1>}
-                {subtitle && <p className="text-xs text-slate-500 mt-0.5 line-clamp-1">{subtitle}</p>}
+                {title && <h1 className="truncate text-xl font-semibold tracking-[-0.035em] text-slate-950 sm:text-[23px]">{title}</h1>}
+                {subtitle && <p className="mt-0.5 line-clamp-2 text-xs text-slate-500">{subtitle}</p>}
               </div>
             </div>
-
-            {actions && <div className="flex items-center gap-2 flex-wrap shrink-0">{actions}</div>}
+            {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
           </header>
         )}
-
-        <main className="flex-1 p-4 sm:p-6 md:p-8 max-w-7xl w-full min-w-0 overflow-x-hidden">{children}</main>
+        <main id="workspace-content" tabIndex={-1} className="ms-workspace-main mx-auto w-full max-w-[1460px] min-w-0 flex-1 px-4 py-7 sm:px-8 sm:py-9 xl:px-11 xl:py-10">
+          {children}
+        </main>
       </div>
     </div>
   )
 }
-

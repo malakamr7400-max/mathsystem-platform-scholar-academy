@@ -1,22 +1,26 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import AdminLayout from '../components/AdminLayout'
 import {
   reportTemplateService,
   type ReportTemplateConfig,
   type RubricTier,
+  type FeedbackRule,
+  type FeedbackCriterion,
   type ReportSectionId,
   type ReportSectionRule,
   type DomainRubricCopy,
   REPORT_SECTION_DISPLAY_FIELDS,
-  DEFAULT_REPORT_RUBRIC_TIERS,
 } from '../lib/reportTemplateService'
 import { assessmentService, type Assessment } from '../lib/assessmentService'
 import { useUnsavedChanges } from '../contexts/UnsavedChangesContext'
+import { ReportSettingsHero, ReportSettingsStats, ReportSettingsTabs, ReportSettingsNotice, RubricScorePreview, validateReportTemplate, type ReportSettingsTab } from '../components/report-settings/ReportSettingsWorkspaceUI'
 import {
-  Sliders,
   CheckCircle2,
   RotateCcw,
+  Search,
+  ChevronDown,
+  ChevronUp,
   Save,
   Plus,
   Trash2,
@@ -43,7 +47,16 @@ export const ReportSettingsPage: React.FC = () => {
     reportTemplateService.getTemplateForAssessment(assessmentId)
   )
 
-  const [activeTab, setActiveTab] = useState<'sections' | 'rubric' | 'thresholds' | 'branding'>('sections')
+  const [activeTab, setActiveTab] = useState<ReportSettingsTab>('sections')
+  const [sectionSearch, setSectionSearch] = useState('')
+  const [sectionFilter, setSectionFilter] = useState<'all' | 'visible' | 'hidden'>('all')
+  const [expandedSections, setExpandedSections] = useState<Partial<Record<ReportSectionId, boolean>>>({})
+  const [saving, setSaving] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [tierError, setTierError] = useState<string | null>(null)
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null)
   const [newTier, setNewTier] = useState<Partial<RubricTier>>({
     name: '',
@@ -54,6 +67,18 @@ export const ReportSettingsPage: React.FC = () => {
     recommendation: '',
   })
   const [showAddTierModal, setShowAddTierModal] = useState(false)
+  const updateFeedbackRule = (id: string, changes: Partial<FeedbackRule>) =>
+    setTemplate(prev => ({ ...prev, feedbackRules: (prev.feedbackRules || []).map(rule => rule.id === id ? { ...rule, ...changes } : rule) }))
+  const addFeedbackRule = () => setTemplate(prev => ({
+    ...prev,
+    feedbackRules: [...(prev.feedbackRules || []), {
+      id: `feedback_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      title: 'New feedback rule', enabled: false, match: 'all' as const,
+      criteria: [{ metric: 'percentage' as const, operator: 'gte' as const, value: 70 }],
+      message: '', recommendation: '',
+    }],
+  }))
+
 
   useEffect(() => {
     const list = assessmentService.getAssessments()
@@ -62,6 +87,8 @@ export const ReportSettingsPage: React.FC = () => {
 
   useEffect(() => {
     let active = true
+    setLoading(true)
+    setLoadError(null)
     reportTemplateService
       .loadTemplateForAssessment(selectedAssessmentId === 'global' ? undefined : selectedAssessmentId)
       .then((loaded) => {
@@ -70,48 +97,60 @@ export const ReportSettingsPage: React.FC = () => {
           setSavedTemplate(loaded)
         }
       })
-      .catch((error) => console.warn('Failed to load report settings:', error))
-    return () => {
-      active = false
-    }
+      .catch((error: unknown) => {
+        if (active) setLoadError(error instanceof Error ? error.message : 'Could not load report settings.')
+      })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
   }, [selectedAssessmentId])
 
+  const dirty = JSON.stringify(template) !== JSON.stringify(savedTemplate)
+  const validation = useMemo(() => validateReportTemplate(template), [template])
+  const selectedAssessment = assessments.find(a => a.id === selectedAssessmentId)
+  const targetLabel = selectedAssessmentId === 'global' ? 'Universal template' : selectedAssessment?.title || 'Selected assessment'
+
   const handleAssessmentChange = (id: string) => {
+    if (id === selectedAssessmentId || loading || saving) return
+    if (dirty && !window.confirm('You have unsaved report changes. Discard them and switch to another assessment?')) return
+    setSaveSuccess(null)
+    setSaveError(null)
     setSelectedAssessmentId(id)
   }
 
   const persistTemplate = async () => {
-    await reportTemplateService.saveTemplateForAssessment(
-      selectedAssessmentId === 'global' ? undefined : selectedAssessmentId,
-      template
-    )
-    setSavedTemplate(template)
-    markClean()
-    setSaveSuccess(
-      `Report format and rubrics successfully saved for ${
-        selectedAssessmentId === 'global'
-          ? 'all global assessments'
-          : assessments.find((a) => a.id === selectedAssessmentId)?.title || 'selected assessment'
-      }!`
-    )
-    setTimeout(() => setSaveSuccess(null), 3500)
-  }
-
-  const handleSave = async () => {
+    if (loading || saving) throw new Error('Wait for the current operation to finish.')
+    if (validation.errors.length) throw new Error(validation.errors[0])
+    setSaving(true)
+    setSaveError(null)
     try {
-      await persistTemplate()
-    } catch (err: any) {
-      alert('Failed to save report configuration: ' + err.message)
+      await reportTemplateService.saveTemplateForAssessment(
+        selectedAssessmentId === 'global' ? undefined : selectedAssessmentId,
+        template
+      )
+      setSavedTemplate(template)
+      markClean()
+      setSaveSuccess(`Changes saved for ${targetLabel}.`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not save report configuration.'
+      setSaveError(message)
+      throw error
+    } finally {
+      setSaving(false)
     }
   }
 
-  const markClean = useUnsavedChanges(
-    JSON.stringify(template) !== JSON.stringify(savedTemplate),
-    persistTemplate
-  )
+  const handleSave = async () => {
+    try { await persistTemplate() } catch { /* Inline error remains visible. */ }
+  }
+
+  const markClean = useUnsavedChanges(dirty, persistTemplate)
 
   const handleReset = async () => {
-    if (confirm('Reset this assessment report layout and rubrics back to system defaults?')) {
+    if (loading || saving) return
+    if (!window.confirm(`Reset report settings for ${targetLabel} to system defaults? This cannot be undone.`)) return
+    setSaving(true)
+    setSaveError(null)
+    try {
       const resetConfig = await reportTemplateService.resetTemplate(
         selectedAssessmentId === 'global' ? undefined : selectedAssessmentId
       )
@@ -119,7 +158,10 @@ export const ReportSettingsPage: React.FC = () => {
       setSavedTemplate(resetConfig)
       markClean()
       setSaveSuccess('Report format reset to default settings.')
-      setTimeout(() => setSaveSuccess(null), 3000)
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Could not reset report settings.')
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -185,15 +227,22 @@ export const ReportSettingsPage: React.FC = () => {
   const handleAddTier = (e: React.FormEvent) => {
     e.preventDefault()
     if (!newTier.name?.trim()) {
-      alert('Please enter a tier name.')
+      setTierError('Please enter a tier name.')
       return
     }
 
+    const minScore = Number(newTier.minScore)
+    const maxScore = Number(newTier.maxScore)
+    if (!Number.isFinite(minScore) || !Number.isFinite(maxScore) || minScore < 0 || maxScore > 100 || minScore > maxScore) {
+      setTierError('Enter a valid range from 0 to 100%, with minimum no greater than maximum.')
+      return
+    }
+    setTierError(null)
     const tierItem: RubricTier = {
       id: `tier_${Date.now().toString(36)}`,
       name: newTier.name.trim(),
-      minScore: Number(newTier.minScore) || 0,
-      maxScore: Number(newTier.maxScore) || 100,
+      minScore,
+      maxScore,
       badgeColor: newTier.badgeColor || 'blue',
       description: newTier.description?.trim() || '',
       recommendation: newTier.recommendation?.trim() || '',
@@ -300,52 +349,46 @@ export const ReportSettingsPage: React.FC = () => {
     { id: 'weak' as const, label: template.categoryLabels.weak, color: 'rose' },
   ]
 
+  const visibleSectionCount = sectionToggles.filter(item => Boolean(template[item.key])).length
+  const filteredSections = sectionToggles.filter(item => {
+    const matchesText = `${item.label} ${item.description} ${item.category}`.toLowerCase().includes(sectionSearch.trim().toLowerCase())
+    const matchesStatus = sectionFilter === 'all' || Boolean(template[item.key]) === (sectionFilter === 'visible')
+    return matchesText && matchesStatus
+  })
+
   return (
     <AdminLayout
-      title="Report Format & Rubrics Customizer"
-      subtitle="Customize generated student diagnostic score reports, visible sections, domain mastery criteria, and rubric performance tiers"
+      title="Scoring & Criteria"
+      subtitle="Set score bands, mastery thresholds, and which existing report sections are available to students"
       actions={
-        <div className="flex items-center gap-2">
-          <Link
-            to="/report/demo?preview=1"
-            onClick={handlePreviewReport}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-2xs transition"
-          >
-            <Eye className="h-3.5 w-3.5 text-blue-600" />
-            <span>Preview Report</span>
-          </Link>
-          <button
-            type="button"
-            onClick={handleReset}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-2xs transition cursor-pointer"
-          >
-            <RotateCcw className="h-3.5 w-3.5 text-slate-500" />
-            <span>Reset Defaults</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 text-xs font-semibold shadow-2xs transition cursor-pointer"
-          >
-            <Save className="h-3.5 w-3.5" />
-            <span>Save Report Configuration</span>
-          </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link to="/report/demo?preview=1" onClick={handlePreviewReport} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"><Eye className="h-4 w-4"/> Preview</Link>
+          <button type="button" disabled={loading || saving || !dirty || validation.errors.length > 0} onClick={handleSave} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"><Save className="h-4 w-4"/>{saving ? 'Saving…' : 'Save changes'}</button>
         </div>
       }
     >
-      <div className="space-y-6 max-w-5xl">
-        {/* Toast */}
-        {saveSuccess && (
-          <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-4 py-2.5 rounded-2xl shadow-xl border border-slate-700 flex items-center gap-2 text-xs font-medium animate-in fade-in duration-200">
-            <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-            <span>{saveSuccess}</span>
+      <div className="mx-auto max-w-7xl space-y-5 pb-12">
+        <ReportSettingsHero target={targetLabel} dirty={dirty} saving={saving}>
+          <Link to="/report/demo?preview=1" onClick={handlePreviewReport} className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 px-4 py-2.5 text-sm font-bold text-white hover:bg-white/20"><Eye className="h-4 w-4"/> Preview report</Link>
+        </ReportSettingsHero>
+        <section className="flex flex-col gap-3 rounded-2xl border border-teal-100 bg-teal-50/60 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5" aria-label="How scoring settings connect to Report Studio">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">What belongs on this page?</h2>
+            <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-600">Use this page for score bands, classifications, mastery thresholds, and existing report-section settings. Use Report Studio to arrange cards, charts, tables, and teacher-authored feedback rules. Changing the layout should not change a student's saved score.</p>
           </div>
-        )}
-
+          <Link to="/admin/report-studio" className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl border border-teal-200 bg-white px-4 py-2.5 text-sm font-semibold text-teal-800 hover:bg-teal-50">Open Report Studio →</Link>
+        </section>
+        <ReportSettingsStats enabled={visibleSectionCount} total={sectionToggles.length} conditional={Object.keys(template.sectionRules || {}).length} tiers={template.rubricTiers.length} />
+        {saveSuccess && <ReportSettingsNotice kind="success" title={saveSuccess} />}
+        {saveError && <ReportSettingsNotice kind="error" title="Changes were not saved">{saveError}</ReportSettingsNotice>}
+        {loadError && <ReportSettingsNotice kind="error" title="Unable to load report settings">{loadError}</ReportSettingsNotice>}
+        {loading && <ReportSettingsNotice kind="info" title="Loading report settings…" />}
+        {validation.errors.length > 0 && <ReportSettingsNotice kind="error" title={`${validation.errors.length} issue${validation.errors.length === 1 ? '' : 's'} must be fixed before saving`}><ul className="list-disc pl-4">{validation.errors.map((message, index) => <li key={index}>{message}</li>)}</ul></ReportSettingsNotice>}
+        {validation.warnings.length > 0 && <ReportSettingsNotice kind="warning" title="Review these configuration warnings"><ul className="list-disc pl-4">{validation.warnings.map((message, index) => <li key={index}>{message}</li>)}</ul></ReportSettingsNotice>}
         {/* Assessment Scope Selector Banner */}
         <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-2xs flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-bold text-blue-700 bg-blue-50 px-2.5 py-0.5 rounded-full border border-blue-100 uppercase tracking-wider">
                 Configuration Target
               </span>
@@ -361,11 +404,12 @@ export const ReportSettingsPage: React.FC = () => {
             </p>
           </div>
 
-          <div className="flex items-center gap-2 min-w-[280px]">
+          <div className="flex items-center gap-2 w-full md:w-[360px]">
             <select
               value={selectedAssessmentId}
               onChange={(e) => handleAssessmentChange(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+              disabled={loading || saving}
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
             >
               <option value="global">🌐 Universal Template (Default for All Assessments)</option>
               {assessments.map((a) => (
@@ -377,60 +421,7 @@ export const ReportSettingsPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Tab Navigation */}
-        <div className="flex items-center gap-2 border-b border-slate-200 pb-2 overflow-x-auto no-scrollbar">
-          <button
-            type="button"
-            onClick={() => setActiveTab('sections')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 shrink-0 cursor-pointer ${
-              activeTab === 'sections'
-                ? 'bg-blue-600 text-white shadow-2xs'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <Sliders className="h-4 w-4" />
-            <span>Report Sections &amp; Visibility</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('rubric')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 shrink-0 cursor-pointer ${
-              activeTab === 'rubric'
-                ? 'bg-blue-600 text-white shadow-2xs'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <Award className="h-4 w-4" />
-            <span>Rubric Performance Tiers ({template.rubricTiers.length})</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('thresholds')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 shrink-0 cursor-pointer ${
-              activeTab === 'thresholds'
-                ? 'bg-blue-600 text-white shadow-2xs'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <SlidersHorizontal className="h-4 w-4" />
-            <span>Mastery Thresholds &amp; Criteria</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('branding')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 shrink-0 cursor-pointer ${
-              activeTab === 'branding'
-                ? 'bg-blue-600 text-white shadow-2xs'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <FileText className="h-4 w-4" />
-            <span>Headers &amp; Custom Guidance</span>
-          </button>
-        </div>
+        <ReportSettingsTabs active={activeTab} onChange={setActiveTab} tiers={template.rubricTiers.length} />
 
         {/* TAB 1: Sections & Visibility */}
         {activeTab === 'sections' && (
@@ -446,8 +437,14 @@ export const ReportSettingsPage: React.FC = () => {
               </div>
             </div>
 
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <label className="relative flex-1"><span className="sr-only">Search report sections</span><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"/><input type="search" value={sectionSearch} onChange={event => setSectionSearch(event.target.value)} placeholder="Search report sections…" className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"/></label>
+              <label><span className="sr-only">Filter section visibility</span><select value={sectionFilter} onChange={event => setSectionFilter(event.target.value as 'all' | 'visible' | 'hidden')} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 sm:w-44"><option value="all">All sections</option><option value="visible">Visible only</option><option value="hidden">Hidden only</option></select></label>
+              <span className="shrink-0 text-xs font-semibold text-slate-500">{filteredSections.length} of {sectionToggles.length}</span>
+            </div>
+            {filteredSections.length === 0 && <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center text-sm text-slate-500">No report sections match your filters.</div>}
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              {sectionToggles.map((item) => {
+              {filteredSections.map((item) => {
                 const isEnabled = Boolean(template[item.key])
                 const rule = template.sectionRules?.[item.key]
                 const availableFields = REPORT_SECTION_DISPLAY_FIELDS[item.key]
@@ -458,11 +455,10 @@ export const ReportSettingsPage: React.FC = () => {
                 return (
                   <div
                     key={String(item.key)}
-                    onClick={() => handleToggleSection(item.key)}
-                    className={`p-4 sm:p-5 rounded-2xl border transition-all duration-200 flex flex-col sm:flex-row items-start justify-between gap-4 cursor-pointer min-w-0 w-full ${
+                    className={`p-4 sm:p-5 rounded-2xl border transition-all duration-200 flex flex-col sm:flex-row items-start justify-between gap-4 min-w-0 w-full ${
                       isEnabled
                         ? 'border-blue-200 bg-blue-50/30 hover:bg-blue-50/50'
-                        : 'border-slate-200 bg-slate-50/40 hover:bg-slate-100/50 opacity-60'
+                        : 'border-slate-200 bg-slate-50/40 hover:bg-slate-100/50'
                     }`}
                   >
                     <div className="flex items-start gap-3 min-w-0 flex-1 w-full">
@@ -485,6 +481,8 @@ export const ReportSettingsPage: React.FC = () => {
                         <p className="text-[11px] text-slate-500 mt-1 leading-relaxed break-words">
                           {item.description}
                         </p>
+                        <button type="button" onClick={() => setExpandedSections(prev => ({ ...prev, [item.key]: !prev[item.key] }))} aria-expanded={Boolean(expandedSections[item.key])} className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50">{expandedSections[item.key] ? <ChevronUp className="h-3.5 w-3.5"/> : <ChevronDown className="h-3.5 w-3.5"/>}{expandedSections[item.key] ? 'Hide' : 'Customize'} conditions &amp; fields</button>
+                        {expandedSections[item.key] && <>
                         <div
                           className="mt-3 flex flex-wrap items-center gap-2"
                           onClick={(event) => event.stopPropagation()}
@@ -501,14 +499,15 @@ export const ReportSettingsPage: React.FC = () => {
                               handleUpdateSectionRule(item.key, {
                                 metric: metric as ReportSectionRule['metric'],
                                 operator: metric === 'grade' ? 'contains' : 'gte',
-                                value: rule?.value || '',
+                                value: metric === rule?.metric ? rule?.value || '' : '',
                               })
                             }}
                             className="bg-white border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-700 max-w-full"
                           >
                             <option value="always">Always</option>
                             <option value="grade">Student grade</option>
-                            <option value="score">Overall score (%)</option>
+                            <option value="score">Overall score (%) — points-based percentage</option>
+                            <option value="practiceScaledScore">Practice scaled score (ACT /36; SAT or EST /800)</option>
                             <option value="totalTimeMinutes">Total time (minutes)</option>
                             <option value="avgTimeSeconds">Average time per question (seconds)</option>
                             <option value="questionCount">Question count</option>
@@ -600,6 +599,7 @@ export const ReportSettingsPage: React.FC = () => {
                             ))}
                           </div>
                         </div>
+                        </>}
                       </div>
                     </div>
 
@@ -649,7 +649,7 @@ export const ReportSettingsPage: React.FC = () => {
               </div>
               <button
                 type="button"
-                onClick={() => setShowAddTierModal(true)}
+                onClick={() => { setTierError(null); setShowAddTierModal(true) }}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition self-start sm:self-auto cursor-pointer"
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -664,13 +664,13 @@ export const ReportSettingsPage: React.FC = () => {
                   className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4 space-y-3"
                 >
                   <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="text-xs font-bold text-slate-400">Tier {idx + 1}</span>
                       <input
                         type="text"
                         value={tier.name}
                         onChange={(e) => handleUpdateRubricTier(idx, { name: e.target.value })}
-                        className="text-xs font-bold text-slate-900 bg-white border border-slate-200 px-3 py-1 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[220px]"
+                        className="text-xs font-bold text-slate-900 bg-white border border-slate-200 px-3 py-1 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-0 w-full sm:w-56"
                         placeholder="Tier Title (e.g. Mastery Tier)"
                       />
                       <select
@@ -748,6 +748,84 @@ export const ReportSettingsPage: React.FC = () => {
                 </div>
               ))}
             </div>
+            <RubricScorePreview tiers={template.rubricTiers} />
+            <section className="rounded-2xl border border-slate-200 bg-slate-50/30 p-4 sm:p-5 space-y-4" aria-labelledby="conditional-feedback-heading">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
+                <div className="space-y-1">
+                  <h3 id="conditional-feedback-heading" className="text-sm font-bold text-slate-900">Conditional Report Feedback</h3>
+                  <p className="text-xs text-slate-500 leading-relaxed">Create optional feedback for specific results. Your existing score bands and recommendations stay in place.</p>
+                </div>
+                <button type="button" onClick={addFeedbackRule} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#24566a] px-4 py-2.5 text-xs font-bold text-white shadow-sm transition hover:bg-[#1d4657] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <Plus className="h-4 w-4" /> Add Feedback Rule
+                </button>
+              </div>
+              {(template.feedbackRules || []).length === 0 && (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-6 text-center">
+                  <p className="text-sm font-semibold text-slate-700">No custom feedback rules yet</p>
+                  <p className="mt-1 text-xs text-slate-500">Add a rule to show extra guidance when a student meets your criteria.</p>
+                </div>
+              )}
+              <div className="space-y-4">
+                {(template.feedbackRules || []).map((rule, index) => (
+                  <div key={rule.id} className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 space-y-4 shadow-2xs">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-lg bg-slate-100 px-2 text-xs font-bold text-slate-600">{index + 1}</span>
+                      <div className="min-w-[180px] flex-1">
+                        <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500" htmlFor={`feedback-rule-title-${rule.id}`}>Rule name</label>
+                        <input id={`feedback-rule-title-${rule.id}`} value={rule.title} onChange={e => updateFeedbackRule(rule.id, { title: e.target.value })} placeholder="e.g. Needs extra practice" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                      <label className="inline-flex items-center gap-2 rounded-lg px-2 py-2 text-xs font-semibold text-slate-600">
+                        <input type="checkbox" checked={rule.enabled} onChange={e => updateFeedbackRule(rule.id, { enabled: e.target.checked })} className="h-4 w-4 accent-emerald-600" /> Enabled
+                      </label>
+                      <button type="button" title="Delete rule" aria-label={`Delete rule ${index + 1}`} onClick={() => setTemplate(prev => ({ ...prev, feedbackRules: (prev.feedbackRules || []).filter(item => item.id !== rule.id) }))} className="rounded-xl border border-slate-200 p-2.5 text-slate-400 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600"><Trash2 className="h-4 w-4" /></button>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3 sm:p-4 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <h4 className="text-xs font-bold text-slate-800">When should this feedback appear?</h4>
+                          <p className="mt-0.5 text-xs text-slate-500">Choose the results a student must achieve.</p>
+                        </div>
+                        <select aria-label="How conditions are combined" value={rule.match} onChange={e => updateFeedbackRule(rule.id, { match: e.target.value as 'all' | 'any' })} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                          <option value="all">Match all (AND)</option><option value="any">Match any (OR)</option>
+                        </select>
+                      </div>
+                      {rule.criteria.map((criterion, ci) => (
+                        <div key={ci} className="grid grid-cols-1 gap-2 rounded-xl border border-slate-200 bg-white p-3 sm:grid-cols-[minmax(0,1fr)_140px_100px_auto] sm:items-end">
+                          <label className="block min-w-0">
+                            <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Score metric</span>
+                            <select value={criterion.metric} onChange={e => { const criteria = [...rule.criteria]; criteria[ci] = { ...criterion, metric: e.target.value as FeedbackCriterion['metric'], value: 0 }; updateFeedbackRule(rule.id, { criteria }) }} className="w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 py-2.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                              <option value="percentage">Overall percentage (%)</option><option value="practiceScaledScore">Practice scaled score (ACT /36, SAT/EST /800)</option><option value="correctCount">Correct answers</option><option value="incorrectCount">Incorrect answers</option><option value="unansweredCount">Unanswered answers</option>
+                            </select>
+                          </label>
+                          <label className="block">
+                            <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Comparison</span>
+                            <select value={criterion.operator} onChange={e => { const criteria = [...rule.criteria]; criteria[ci] = { ...criterion, operator: e.target.value as FeedbackCriterion['operator'] }; updateFeedbackRule(rule.id, { criteria }) }} className="w-full rounded-lg border border-slate-200 bg-white px-2 py-2.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"><option value="gte">At least</option><option value="lte">At most</option><option value="eq">Exactly</option></select>
+                          </label>
+                          <label className="block">
+                            <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Value</span>
+                            <input type="number" min="0" max={criterion.metric === 'percentage' ? 100 : undefined} value={criterion.value} onChange={e => { const criteria = [...rule.criteria]; criteria[ci] = { ...criterion, value: Number(e.target.value) }; updateFeedbackRule(rule.id, { criteria }) }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                          </label>
+                          {rule.criteria.length > 1 ? <button type="button" title="Remove condition" aria-label={`Remove condition ${ci + 1}`} onClick={() => updateFeedbackRule(rule.id, { criteria: rule.criteria.filter((_, i) => i !== ci) })} className="rounded-lg border border-slate-200 p-2.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"><Trash2 className="h-4 w-4" /></button> : <span className="hidden sm:block" />}
+                        </div>
+                      ))}
+                      <button type="button" onClick={() => updateFeedbackRule(rule.id, { criteria: [...rule.criteria, { metric: 'percentage', operator: 'gte', value: 70 }] })} className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-50"><Plus className="h-3.5 w-3.5" /> Add Condition</button>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Diagnostic Evaluation Summary</span>
+                        <textarea rows={3} value={rule.message} onChange={e => updateFeedbackRule(rule.id, { message: e.target.value })} className="w-full rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Explain what this result means for the student..." />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Prescriptive Next-Step Recommendation</span>
+                        <textarea rows={3} value={rule.recommendation} onChange={e => updateFeedbackRule(rule.id, { recommendation: e.target.value })} className="w-full rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Suggest a practical next step..." />
+                      </label>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs leading-relaxed text-slate-500">Matching enabled rules appear in the report in the order shown. Existing performance tiers are not changed.</p>
+            </section>
+
           </div>
         )}
 
@@ -1046,6 +1124,11 @@ export const ReportSettingsPage: React.FC = () => {
             </div>
           </div>
         )}
+        <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+          <div><p className="text-sm font-bold text-slate-900">{dirty ? 'You have unsaved report changes' : 'All changes saved'}</p></div>
+          <div className="flex flex-wrap gap-2"><button type="button" onClick={() => setShowAdvanced(prev => !prev)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">{showAdvanced ? 'Hide' : 'More tools'}</button><button type="button" disabled={loading || saving || !dirty || validation.errors.length > 0} onClick={handleSave} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"><Save className="h-4 w-4"/>{saving ? 'Saving…' : 'Save report settings'}</button></div>
+        </div>
+        {showAdvanced && <div className="rounded-2xl border border-rose-200 bg-rose-50/50 p-4"><p className="text-sm font-bold text-slate-900">Advanced actions</p><p className="mt-1 text-xs text-slate-600">Resetting deletes the selected scope's customized configuration. This action cannot be undone.</p><button type="button" disabled={loading || saving} onClick={handleReset} className="mt-3 inline-flex items-center gap-2 rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"><RotateCcw className="h-4 w-4"/> Reset selected template</button></div>}
       </div>
 
       {/* Add Rubric Tier Modal */}
@@ -1064,6 +1147,7 @@ export const ReportSettingsPage: React.FC = () => {
             </div>
 
             <form onSubmit={handleAddTier} className="space-y-3">
+              {tierError && <ReportSettingsNotice kind="error" title={tierError} />}
               <div>
                 <label className="text-xs font-semibold text-slate-700 block mb-1">
                   Tier Title / Name

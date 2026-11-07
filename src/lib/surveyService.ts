@@ -436,7 +436,7 @@ export const surveyService = {
     return []
   },
 
-  async saveStudentResponse(attemptId: string, answers: Record<string, any>, scorePct?: number): Promise<ActionPlan> {
+  async saveStudentResponse(attemptId: string, answers: Record<string, any>, scorePct?: number, resumeToken?: string): Promise<ActionPlan> {
     const plans = this.getActionPlans()
     const matchedPlan = this.matchActionPlan(answers, scorePct, plans)
 
@@ -447,24 +447,14 @@ export const surveyService = {
       matched_plan_id: matchedPlan.id,
     }
 
-    const { data: attempt, error: loadError } = await supabase
-      .from('attempts')
-      .select('report_data')
-      .eq('id', attemptId)
-      .maybeSingle()
-    if (loadError) throw loadError
-    if (!attempt) throw new Error('Could not find the completed attempt to save the survey response.')
-
-    const { error } = await supabase
-      .from('attempts')
-      .update({
-        report_data: {
-          ...(attempt.report_data || {}),
-          post_assessment_survey: response,
-        },
-      })
-      .eq('id', attemptId)
+    if (!resumeToken) throw new Error('Missing secure attempt token. Reopen the completed attempt from its original link.')
+    const { data: saved, error } = await supabase.rpc('save_attempt_survey_v1', {
+      p_attempt_id: attemptId,
+      p_resume_token: resumeToken,
+      p_survey: response,
+    })
     if (error) throw error
+    if (saved !== true) throw new Error('Supabase did not confirm the survey was saved.')
 
     _surveyResponsesCache[attemptId] = response
     return matchedPlan

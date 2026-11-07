@@ -30,12 +30,15 @@ export const ModuleQuestionsPage: React.FC = () => {
 
   useEffect(() => {
     if (assessmentId) {
-      const a = assessmentService.getAssessmentById(assessmentId)
-      if (a) {
-        setAssessment(a)
-        const sec = a.sections.find((s) => s.id === moduleId) || a.sections[0] || null
-        setSection(sec)
-      }
+      assessmentService.fetchAssessmentsFromDatabase()
+        .then((list) => {
+          const a = list.find((item) => item.id === assessmentId)
+          if (!a) return
+          setAssessment(a)
+          const sec = a.sections.find((item) => item.id === moduleId) || a.sections[0] || null
+          setSection(sec)
+        })
+        .catch((error) => alert(error instanceof Error ? error.message : String(error)))
     }
     questionBankService.fetchQuestionsFromDatabase()
       .then((qList) => setBankQuestions(qList))
@@ -59,13 +62,10 @@ export const ModuleQuestionsPage: React.FC = () => {
     )
   }
 
-  const handleRemoveQuestion = (qItemId: string) => {
-    if (section.questions.length <= 1) {
-      alert('Each section must have at least 1 question. You cannot delete the only question.')
-      return
-    }
+  const handleRemoveQuestion = async (qItemId: string) => {
     try {
       const updated = assessmentService.removeQuestionFromSection(assessment.id, section.id, qItemId)
+      await assessmentService.syncAssessmentToDatabase(updated)
       setAssessment(updated)
       setSection(updated.sections.find((s) => s.id === section.id) || null)
     } catch (err: any) {
@@ -73,7 +73,7 @@ export const ModuleQuestionsPage: React.FC = () => {
     }
   }
 
-  const handleMoveQuestion = (idx: number, dir: -1 | 1) => {
+  const handleMoveQuestion = async (idx: number, dir: -1 | 1) => {
     const targetIdx = idx + dir
     if (targetIdx < 0 || targetIdx >= section.questions.length) return
 
@@ -88,6 +88,7 @@ export const ModuleQuestionsPage: React.FC = () => {
         section.id,
         newQuestions.map((q) => q.id)
       )
+      await assessmentService.syncAssessmentToDatabase(updated)
       setAssessment(updated)
       setSection(updated.sections.find((s) => s.id === section.id) || null)
     } catch (err: any) {
@@ -95,10 +96,11 @@ export const ModuleQuestionsPage: React.FC = () => {
     }
   }
 
-  const handleAddSelectedQuestions = () => {
+  const handleAddSelectedQuestions = async () => {
     if (selectedQIds.length === 0) return
     try {
       const updated = assessmentService.addQuestionsToSection(assessment.id, section.id, selectedQIds)
+      await assessmentService.syncAssessmentToDatabase(updated)
       setAssessment(updated)
       setSection(updated.sections.find((s) => s.id === section.id) || null)
       setShowPicker(false)

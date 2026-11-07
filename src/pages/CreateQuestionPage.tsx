@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react'
+import { parseNumericAnswer, parseNumericTolerance } from '../lib/numericAnswer'
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom'
 import AdminLayout from '../components/AdminLayout'
 import 'katex/dist/katex.min.css'
@@ -32,12 +33,16 @@ import {
   questionBankService,
   QuestionChoice,
   QuestionBankItem,
+  GenericTaxonomy,
 } from '../lib/questionBankService'
 import { executeUnitOfWork } from '../lib/unitOfWork'
 import { assessmentService } from '../lib/assessmentService'
 import MathRenderer from '../components/MathRenderer'
 import MathSymbolInserter, { MathSymbolItem } from '../components/MathSymbolInserter'
 import { useUnsavedChanges } from '../contexts/UnsavedChangesContext'
+import { supabase } from '../lib/supabaseClient'
+import { QuestionEditorOverview, QuestionEditorNavigation, QuestionEditorViewSwitch, type QuestionEditorStep, type QuestionEditorStepId } from '../components/question-editor/QuestionEditorUI'
+import '../components/question-editor/QuestionEditor.css'
 
 export const CreateQuestionPage: React.FC = () => {
   const navigate = useNavigate()
@@ -49,9 +54,34 @@ export const CreateQuestionPage: React.FC = () => {
   // Question Categorization State (Domain (Unit) -> Chapter -> Lesson)
   // Strictly database-backed: starts empty if database has no taxonomy, never seeded with hardcoded fallbacks
   const [taxonomyData, setTaxonomyData] = useState<Record<string, any>>(() => questionBankService.getTaxonomy() || {})
+  const [genericTaxonomies, setGenericTaxonomies] = useState<GenericTaxonomy[]>([])
+  const [customTaxonomyId, setCustomTaxonomyId] = useState('')
+  const [selectedTaxonomyNodes, setSelectedTaxonomyNodes] = useState<any[]>([])
+  const [isLoadingSelectedTaxonomyNodes, setIsLoadingSelectedTaxonomyNodes] = useState(false)
+  // Taxonomy selected for the question itself. This is the parent context for
+  // Domain / Chapter / Lesson and for any custom taxonomy items created here.
+  const [selectedQuestionTaxonomyId, setSelectedQuestionTaxonomyId] = useState('')
+  const initialQuestionTaxonomyIdRef = useRef<string>('')
   const [domain, setDomain] = useState<string>('')
   const [chapter, setChapter] = useState<string>('')
   const [lesson, setLesson] = useState<string>('')
+  const [savedGenericTaxonomyLabels, setSavedGenericTaxonomyLabels] = useState<string[]>([])
+  const [originalQuestionClassification, setOriginalQuestionClassification] = useState<{ domain: string; chapter: string; lesson: string } | null>(null)
+  const [savedTaxonomyNodeIds, setSavedTaxonomyNodeIds] = useState<string[]>([])
+  const [savedTaxonomyNodeTaxonomyIds, setSavedTaxonomyNodeTaxonomyIds] = useState<Record<string, string>>({})
+  const [isLoadingSavedTaxonomy, setIsLoadingSavedTaxonomy] = useState(false)
+
+  // Taxonomy items created while editing are drafts. They are shown immediately
+  // in the selectors, but are not written to Supabase until the question is saved.
+  type DraftTaxonomyNode = {
+    taxonomyId: string
+    type: 'domain' | 'chapter' | 'lesson'
+    domain: string
+    chapter?: string
+    lesson?: string
+  }
+  const [draftTaxonomyNodes, setDraftTaxonomyNodes] = useState<DraftTaxonomyNode[]>([])
+  const [draftTaxonomyData, setDraftTaxonomyData] = useState<Record<string, any>>({})
   const [collection, setCollection] = useState<string>(queryCollection || 'General Question Bank')
   const [isCustomDomain, setIsCustomDomain] = useState(false)
   const [isCustomChapter, setIsCustomChapter] = useState(false)
@@ -68,14 +98,27 @@ export const CreateQuestionPage: React.FC = () => {
   const [isQuickCollectionModalOpen, setIsQuickCollectionModalOpen] = useState(false)
   const [quickColName, setQuickColName] = useState('')
   const [quickColDesc, setQuickColDesc] = useState('')
-  const [quickColTargetExam, setQuickColTargetExam] = useState('EST 1 / SAT Math')
   const [quickColError, setQuickColError] = useState<string | null>(null)
+  const [isSavingQuickCollection, setIsSavingQuickCollection] = useState(false)
+  const [quickColSuccess, setQuickColSuccess] = useState<string | null>(null)
+  const quickCollectionInFlightRef = useRef(false)
+  const saveQuestionInFlightRef = useRef(false)
+  const saveCompletedRef = useRef(false)
 
   // Delete Question confirmation modal in edit mode
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+  const [hasUnsavedChanges, setHasUnsavedChangesState] = useState(false)
+  const hasUnsavedChangesRef = useRef(false)
+  const setHasUnsavedChanges = useCallback((value: boolean | ((current: boolean) => boolean)) => {
+    setHasUnsavedChangesState((current) => {
+      const next = typeof value === 'function' ? value(current) : value
+      hasUnsavedChangesRef.current = next
+      return next
+    })
+  }, [])
   const [isSaving, setIsSaving] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null)
 
   // Pedagogical & Exam Metadata
@@ -127,6 +170,7 @@ export const CreateQuestionPage: React.FC = () => {
   // Numeric Free Response / Grid-in Answer
   const [numericAnswer, setNumericAnswer] = useState('')
   const [numericTolerance, setNumericTolerance] = useState('0')
+  const [numericAlternateAnswers, setNumericAlternateAnswers] = useState('')
 
   // Detailed Solution & Diagnostic Feedback
   const [explanation, setExplanation] = useState('')
@@ -136,7 +180,7 @@ export const CreateQuestionPage: React.FC = () => {
   const [previewSelectedChoice, setPreviewSelectedChoice] = useState<string | null>(null)
   const [previewMultiSelected, setPreviewMultiSelected] = useState<string[]>([])
   const [previewInputAnswer, setPreviewInputAnswer] = useState('')
-  const [showExplanationInPreview, setShowExplanationInPreview] = useState(true)
+  const [showExplanationInPreview, setShowExplanationInPreview] = useState(false)
   const [previewMode, setPreviewMode] = useState<'split' | 'editor' | 'preview'>('split')
   const promptTextareaRef = useRef<HTMLTextAreaElement>(null)
   const explanationTextareaRef = useRef<HTMLTextAreaElement>(null)
@@ -150,91 +194,523 @@ export const CreateQuestionPage: React.FC = () => {
   const [questionNotFound, setQuestionNotFound] = useState(false)
   const isQuestionLoadedRef = useRef(false)
   const initialDomainRef = useRef<string | null>(null)
+  const initialEditorSnapshotRef = useRef<string | null>(null)
+  const [isEditorHydrated, setIsEditorHydrated] = useState(false)
 
-  // Load existing question if in edit mode and fetch taxonomy from database
+  // Snapshot every persisted editor value so dirty-state tracking is not limited
+  // to native input change events. This also covers button-driven edits such as
+  // calculator permission, answer-key changes, adding/removing choices, and image removal.
+  const editorSnapshot = useMemo(() => JSON.stringify({
+    domain,
+    chapter,
+    lesson,
+    collection,
+    selectedQuestionTaxonomyId,
+    difficulty,
+    questionType,
+    calculatorAllowed,
+    estimatedSeconds,
+    targetExam,
+    prompt,
+    imageUrl,
+    imageCaption,
+    choices: choices.map((choice) => ({
+      id: choice.id,
+      text: choice.text,
+      isCorrect: choice.isCorrect,
+      rationale: choice.rationale || '',
+    })),
+    numericAnswer,
+    numericAlternateAnswers,
+    numericTolerance,
+    explanation,
+    commonMisconception,
+    savedTaxonomyNodeIds: [...savedTaxonomyNodeIds].map(String).sort(),
+    savedTaxonomyNodeTaxonomyIds,
+    draftTaxonomyNodes,
+    draftTaxonomyData,
+  }), [
+    domain,
+    chapter,
+    lesson,
+    collection,
+    selectedQuestionTaxonomyId,
+    difficulty,
+    questionType,
+    calculatorAllowed,
+    estimatedSeconds,
+    targetExam,
+    prompt,
+    imageUrl,
+    imageCaption,
+    choices,
+    numericAnswer,
+    numericAlternateAnswers,
+    numericTolerance,
+    explanation,
+    commonMisconception,
+    savedTaxonomyNodeIds,
+    savedTaxonomyNodeTaxonomyIds,
+    draftTaxonomyNodes,
+    draftTaxonomyData,
+  ])
+
   useEffect(() => {
-    const collectionsList = questionBankService.getCollectionsList().map((c) => c.name)
-    setExistingCollections(collectionsList)
-    const currentTax = questionBankService.getTaxonomy() || {}
-    setTaxonomyData(currentTax)
+    if (!isEditorHydrated) return
 
-    // Subscribe to live taxonomy updates
-    const unsubscribeTax = questionBankService.subscribeTaxonomy((latestTax) => {
-      setTaxonomyData(latestTax || {})
-    })
-
-    questionBankService.fetchTaxonomy().then((freshTax) => {
-      if (freshTax && typeof freshTax === 'object') {
-        setTaxonomyData(freshTax)
-      }
-    }).catch(() => {})
-
-    if (questionId) {
-      let existing = questionBankService.getQuestionById(questionId)
-
-      // Fallback: Check if question is stored in any assessment section
-      if (!existing) {
-        const assessments = assessmentService.getStoredAssessments()
-        for (const ass of assessments) {
-          for (const sec of ass.sections || []) {
-            for (const qItem of sec.questions || []) {
-              if (qItem.questionId === questionId || qItem.id === questionId) {
-                if (qItem.questionSnapshot) {
-                  existing = qItem.questionSnapshot as QuestionBankItem
-                  break
-                }
-              }
-            }
-            if (existing) break
-          }
-          if (existing) break
-        }
-      }
-
-      if (existing) {
-        initialDomainRef.current = existing.domain || ''
-        setDomain(existing.domain || '')
-        setChapter(existing.chapter || '')
-        setLesson(existing.lesson || '')
-        setCollection(existing.collection || 'General Question Bank')
-        setQuestionType(existing.questionType || 'multiple_choice')
-        setDifficulty(existing.difficulty || 'medium')
-        setCalculatorAllowed(Boolean(existing.calculatorAllowed))
-        setEstimatedSeconds(existing.estimatedSeconds || 90)
-        setTargetExam(existing.targetExam || 'EST 1 / SAT Math')
-        setPrompt(existing.prompt || '')
-        setImageUrl(existing.imageUrl || '')
-        setImageCaption(existing.imageCaption || '')
-        if (existing.choices && Array.isArray(existing.choices) && existing.choices.length > 0) {
-          const normalizedChoices = existing.choices.map((c: any, idx: number) => ({
-            id: c?.id || `c${idx + 1}`,
-            text: typeof c === 'string' ? c : (c?.text ?? ''),
-            isCorrect: Boolean(c?.isCorrect),
-            rationale: c?.rationale || '',
-          }))
-          setChoices(normalizedChoices)
-        }
-        setNumericAnswer(existing.numericAnswer || '')
-        setNumericTolerance(existing.numericTolerance || '0')
-        setExplanation(existing.explanation || '')
-        setCommonMisconception(existing.commonMisconception || '')
-        isQuestionLoadedRef.current = true
-      } else {
-        setQuestionNotFound(true)
-      }
-    } else if (queryCollection) {
-      setCollection(queryCollection)
+    if (initialEditorSnapshotRef.current === null) {
+      initialEditorSnapshotRef.current = editorSnapshot
+      setHasUnsavedChanges(false)
+      return
     }
 
+    // A successful explicit save may update draft-related state immediately
+    // after persistence. Establish the new clean baseline from the committed
+    // state before resuming normal dirty tracking.
+    if (saveCompletedRef.current) {
+      initialEditorSnapshotRef.current = editorSnapshot
+      saveCompletedRef.current = false
+      setHasUnsavedChanges(false)
+      return
+    }
+
+    const nextDirty = editorSnapshot !== initialEditorSnapshotRef.current
+    setHasUnsavedChanges((current) => current === nextDirty ? current : nextDirty)
+  }, [editorSnapshot, isEditorHydrated])
+
+  // Domain / Chapter / Lesson selectors are derived ONLY from the currently
+  // selected generic taxonomy. Legacy taxonomyData is intentionally not used
+  // here because it contains items from multiple taxonomies. Draft custom
+  // items are merged into this selected-taxonomy view until the question is saved.
+  const editorTaxonomyData = useMemo(() => {
+    const merged: Record<string, any> = {}
+
+    const nodes = selectedTaxonomyNodes.filter(
+      (node) => String(node.taxonomyId || '') === String(selectedQuestionTaxonomyId || '')
+    )
+
+    const byId = new Map<string, any>(nodes.map((node) => [String(node.id), node]))
+
+    for (const node of nodes) {
+      if (node.parentId) continue
+      merged[node.name] = {
+        unitLabel: node.name,
+        code: node.code || '',
+        chapters: [],
+        nodeId: String(node.id),
+      }
+    }
+
+    for (const node of nodes) {
+      if (!node.parentId) continue
+      const parent = byId.get(String(node.parentId))
+      if (!parent) continue
+      const parentDomain = merged[parent.name]
+      if (!parentDomain) continue
+      const hasChild = parentDomain.chapters.some((item: any) => String(item.nodeId) === String(node.id))
+      if (!hasChild) {
+        parentDomain.chapters.push({
+          name: node.name,
+          code: node.code || '',
+          lessons: [],
+          nodeId: String(node.id),
+        })
+      }
+    }
+
+    // The generic taxonomy supports arbitrary depth. For this compatibility
+    // editor, the first three levels are exposed as Domain -> Chapter -> Lesson.
+    for (const node of nodes) {
+      if (!node.parentId) continue
+      const chapterNode = byId.get(String(node.parentId))
+      if (!chapterNode?.parentId) continue
+      const domainNode = byId.get(String(chapterNode.parentId))
+      if (!domainNode) continue
+      const domainEntry = merged[domainNode.name]
+      const chapterEntry = domainEntry?.chapters?.find(
+        (item: any) => String(item.nodeId) === String(chapterNode.id)
+      )
+      if (chapterEntry && !chapterEntry.lessons.some((item: any) => String(item.nodeId || item) === String(node.id))) {
+        chapterEntry.lessons.push({
+          name: node.name,
+          code: node.code || '',
+          nodeId: String(node.id),
+        })
+      }
+    }
+
+    // Merge only draft nodes belonging to the currently selected taxonomy.
+    const drafts = draftTaxonomyNodes.filter(
+      (node) => String(node.taxonomyId) === String(selectedQuestionTaxonomyId || '')
+    )
+    for (const draft of drafts) {
+      const domainName = draft.domain.trim()
+      if (draft.type === 'domain') {
+        if (!merged[domainName]) {
+          merged[domainName] = { unitLabel: domainName, code: '', chapters: [], isDraft: true }
+        }
+      } else if (draft.type === 'chapter') {
+        const domainEntry = merged[domainName] || { unitLabel: domainName, code: '', chapters: [], isDraft: true }
+        if (!merged[domainName]) merged[domainName] = domainEntry
+        if (!domainEntry.chapters.some((item: any) => String(item.name).toLowerCase() === String(draft.chapter || '').trim().toLowerCase())) {
+          domainEntry.chapters.push({ name: String(draft.chapter || '').trim(), code: '', lessons: [], isDraft: true })
+        }
+      } else if (draft.type === 'lesson') {
+        const domainEntry = merged[domainName] || { unitLabel: domainName, code: '', chapters: [], isDraft: true }
+        if (!merged[domainName]) merged[domainName] = domainEntry
+        let chapterEntry = domainEntry.chapters.find(
+          (item: any) => String(item.name).toLowerCase() === String(draft.chapter || '').trim().toLowerCase()
+        )
+        if (!chapterEntry) {
+          chapterEntry = { name: String(draft.chapter || '').trim(), code: '', lessons: [], isDraft: true }
+          domainEntry.chapters.push(chapterEntry)
+        }
+        if (!chapterEntry.lessons.some((item: any) => String(item.name || item).toLowerCase() === String(draft.lesson || '').trim().toLowerCase())) {
+          chapterEntry.lessons.push({ name: String(draft.lesson || '').trim(), code: '', isDraft: true })
+        }
+      }
+    }
+
+    return merged
+  }, [selectedTaxonomyNodes, selectedQuestionTaxonomyId, draftTaxonomyNodes])
+
+  // Load the authoritative generic taxonomy list and saved collections once when
+  // the editor mounts. The selectors must never depend on the legacy taxonomy cache:
+  // a new question needs an explicit parent taxonomy before its hierarchy can be chosen.
+  useEffect(() => {
+    let cancelled = false
+
+    const loadEditorReferenceData = async () => {
+      try {
+        const [taxonomies] = await Promise.all([
+          questionBankService.fetchGenericTaxonomies(),
+          questionBankService.fetchCollectionsFromDatabase(),
+        ])
+
+        if (cancelled) return
+
+        // Keep the full GenericTaxonomy contract intact. Do not reduce these
+        // objects to { id, name, code }, because the editor state intentionally
+        // models organization ownership and active/inactive status as well.
+        const activeTaxonomies: GenericTaxonomy[] = (taxonomies || [])
+          .filter((taxonomy): taxonomy is GenericTaxonomy => Boolean(taxonomy?.id && taxonomy?.name))
+          .filter((taxonomy) => taxonomy.isActive !== false)
+          .map((taxonomy) => ({
+            id: String(taxonomy.id),
+            organizationId: String(taxonomy.organizationId || ''),
+            name: String(taxonomy.name || '').trim(),
+            code: taxonomy.code ? String(taxonomy.code) : undefined,
+            description: taxonomy.description ? String(taxonomy.description) : undefined,
+            isActive: taxonomy.isActive !== false,
+          }))
+          .filter((taxonomy) => taxonomy.id && taxonomy.name && taxonomy.organizationId)
+
+        setGenericTaxonomies(activeTaxonomies)
+
+        const collectionNames = Array.from(
+          new Set(
+            questionBankService
+              .getCollectionsList()
+              .map((item) => String(item?.name || '').trim())
+              .filter(Boolean)
+          )
+        )
+        setExistingCollections(collectionNames)
+
+        // Keep the persisted edit selection if one exists. For a new question,
+        // intentionally leave Taxonomy empty so the author explicitly chooses
+        // where the question belongs.
+      } catch (error) {
+        if (!cancelled) {
+          console.error('[Question Editor] Failed to load taxonomy/collection references:', error)
+          setGenericTaxonomies([])
+          setExistingCollections([])
+        }
+      }
+    }
+
+    void loadEditorReferenceData()
+
     return () => {
-      unsubscribeTax()
+      cancelled = true
+    }
+  }, [])
+
+  // Load only the nodes belonging to the selected taxonomy.
+  useEffect(() => {
+    let cancelled = false
+    const taxonomyId = String(selectedQuestionTaxonomyId || '').trim()
+    if (!taxonomyId) {
+      setSelectedTaxonomyNodes([])
+      setIsLoadingSelectedTaxonomyNodes(false)
+      return
+    }
+
+    setIsLoadingSelectedTaxonomyNodes(true)
+    void questionBankService.fetchGenericTaxonomyNodes(taxonomyId)
+      .then((nodes) => {
+        if (!cancelled) setSelectedTaxonomyNodes(nodes || [])
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error('[Question Editor] Failed to load selected taxonomy nodes:', error)
+          setSelectedTaxonomyNodes([])
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingSelectedTaxonomyNodes(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedQuestionTaxonomyId])
+
+  // Load the complete persisted question context before hydrating dependent
+  // selectors. Edit mode must never render a default/empty taxonomy and then
+  // overwrite the persisted value because a second request finished later.
+  useEffect(() => {
+    let cancelled = false
+
+    const hydrateQuestion = async () => {
+      setIsEditorHydrated(false)
+      initialEditorSnapshotRef.current = null
+      setHasUnsavedChanges(false)
+      setSavedGenericTaxonomyLabels([])
+      setSavedTaxonomyNodeIds([])
+      setSavedTaxonomyNodeTaxonomyIds({})
+      setIsLoadingSavedTaxonomy(false)
+      setQuestionNotFound(false)
+
+      if (!questionId) {
+        if (queryCollection) setCollection(queryCollection)
+        setIsEditorHydrated(true)
+        return
+      }
+
+      let existing: QuestionBankItem | null = null
+
+      try {
+        // Cache-first, database-backed fallback. This is required for direct
+        // navigation and browser refreshes in edit mode.
+        existing = await questionBankService.fetchQuestionById(questionId)
+      } catch (error: any) {
+        console.error('[Question Editor] Failed to load question from database:', error)
+        if (!cancelled) {
+          setFormError(error?.message || 'Could not load this question. Please try again.')
+        }
+        return
+      }
+
+      if (!existing) {
+        const assessments = assessmentService.getStoredAssessments()
+        outer: for (const assessment of assessments) {
+          for (const section of assessment.sections || []) {
+            const match = (section.questions || []).find(
+              (item) => item.questionId === questionId || item.id === questionId
+            )
+            if (match?.questionSnapshot) {
+              existing = match.questionSnapshot as QuestionBankItem
+              break outer
+            }
+          }
+        }
+      }
+
+      if (!existing) {
+        if (!cancelled) setQuestionNotFound(true)
+        return
+      }
+
+      if (cancelled) return
+
+      // Hydrate scalar question data first. Relationship state is hydrated below
+      // from its authoritative database relationships and must not be replaced
+      // by defaults from the local question cache.
+      setOriginalQuestionClassification({ domain: existing.domain || '', chapter: existing.chapter || '', lesson: existing.lesson || '' })
+      initialDomainRef.current = existing.domain || ''
+      setDomain(existing.domain || '')
+      setChapter(existing.chapter || '')
+      setLesson(existing.lesson || '')
+      setCollection(existing.collection || 'General Question Bank')
+      setQuestionType(existing.questionType || 'multiple_choice')
+      setDifficulty(existing.difficulty || 'medium')
+      setCalculatorAllowed(Boolean(existing.calculatorAllowed))
+      setEstimatedSeconds(existing.estimatedSeconds || 90)
+      setTargetExam(existing.targetExam || 'EST 1 / SAT Math')
+      setPrompt(existing.prompt || '')
+      setImageUrl(existing.imageUrl || '')
+      setImageCaption(existing.imageCaption || '')
+      if (existing.choices && Array.isArray(existing.choices) && existing.choices.length > 0) {
+        setChoices(existing.choices.map((choice: any, index: number) => ({
+          id: choice?.id || `c${index + 1}`,
+          text: typeof choice === 'string' ? choice : (choice?.text ?? ''),
+          isCorrect: Boolean(choice?.isCorrect),
+          rationale: choice?.rationale || '',
+        })))
+      }
+      setNumericAnswer(existing.numericAnswer || '')
+      setNumericAlternateAnswers((existing.numericAlternateAnswers || []).join('\n'))
+      setNumericTolerance(existing.numericTolerance || '0')
+      setExplanation(existing.explanation || '')
+      setCommonMisconception(existing.commonMisconception || '')
+
+      setIsLoadingSavedTaxonomy(true)
+      try {
+        const context = await questionBankService.fetchQuestionEditorContext(questionId)
+        if (cancelled) return
+
+        if (context.collectionName) setCollection(context.collectionName)
+
+        let nodeIds = Array.from(new Set(context.taxonomyNodeIds.map(String).filter(Boolean)))
+        let taxonomyId = context.taxonomyId ? String(context.taxonomyId) : ''
+        let taxonomyNodes = context.taxonomyNodes || []
+
+        // Compatibility fallback for older/local questions whose relationship
+        // rows predate the generic taxonomy relationship table.
+        if (nodeIds.length === 0 && Array.isArray(existing.taxonomyNodeIds) && existing.taxonomyNodeIds.length > 0) {
+          nodeIds = Array.from(new Set(existing.taxonomyNodeIds.map(String).filter(Boolean)))
+        }
+
+        if (!taxonomyId && nodeIds.length > 0) {
+          const taxonomies = await questionBankService.fetchGenericTaxonomies()
+          const nodeSets = await Promise.all(
+            taxonomies.map(async (taxonomy) => ({
+              taxonomyId: String(taxonomy.id),
+              nodes: await questionBankService.fetchGenericTaxonomyNodes(String(taxonomy.id)),
+            }))
+          )
+          for (const set of nodeSets) {
+            if (set.nodes.some((node) => nodeIds.includes(String(node.id)))) {
+              taxonomyId = set.taxonomyId
+              taxonomyNodes = set.nodes
+              break
+            }
+          }
+        }
+
+        // Last compatibility path: resolve legacy Domain > Chapter > Lesson
+        // labels into the generic taxonomy without creating or mutating data.
+        if (!taxonomyId) {
+          const legacyDomain = String(existing.domain || '').trim().toLowerCase()
+          const legacyChapter = String(existing.chapter || '').trim().toLowerCase()
+          const legacyLesson = String(existing.lesson || '').trim().toLowerCase()
+          if (legacyDomain && legacyChapter && legacyLesson) {
+            const taxonomies = await questionBankService.fetchGenericTaxonomies()
+            for (const taxonomy of taxonomies.filter((item) => item.isActive)) {
+              const nodes = await questionBankService.fetchGenericTaxonomyNodes(String(taxonomy.id))
+              const domainNode = nodes.find(
+                (node) => !node.parentId && node.name.trim().toLowerCase() === legacyDomain
+              )
+              if (!domainNode) continue
+              const chapterNode = nodes.find(
+                (node) => String(node.parentId || '') === String(domainNode.id) &&
+                  node.name.trim().toLowerCase() === legacyChapter
+              )
+              if (!chapterNode) continue
+              const lessonNode = nodes.find(
+                (node) => String(node.parentId || '') === String(chapterNode.id) &&
+                  node.name.trim().toLowerCase() === legacyLesson
+              )
+              const resolved = lessonNode || chapterNode || domainNode
+              taxonomyId = String(taxonomy.id)
+              taxonomyNodes = nodes
+              nodeIds = [String(resolved.id)]
+              break
+            }
+          }
+        }
+
+        // Some persisted editor contexts contain the taxonomy ID but omit its
+        // node collection. Fetch the actual hierarchy before restoring selectors.
+        if (taxonomyId && taxonomyNodes.length === 0) {
+          taxonomyNodes = await questionBankService.fetchGenericTaxonomyNodes(taxonomyId)
+          if (cancelled) return
+        }
+
+        if (taxonomyId) {
+          // Establish parent taxonomy and its complete node set before the
+          // dependent Domain/Chapter/Lesson selectors are considered hydrated.
+          setSelectedQuestionTaxonomyId(taxonomyId)
+          setCustomTaxonomyId(taxonomyId)
+          initialQuestionTaxonomyIdRef.current = taxonomyId
+          setSelectedTaxonomyNodes(
+            taxonomyNodes.filter((node) => String(node.taxonomyId) === taxonomyId)
+          )
+        }
+
+        const nodesById = new Map(taxonomyNodes.map((node) => [String(node.id), node]))
+        const taxonomies = await questionBankService.fetchGenericTaxonomies()
+        const taxonomyNames = new Map(taxonomies.map((item) => [String(item.id), item.name]))
+
+        const taxonomyIdMap: Record<string, string> = {}
+        for (const id of nodeIds) {
+          const node = nodesById.get(String(id))
+          if (node) taxonomyIdMap[String(id)] = String(node.taxonomyId)
+        }
+
+        setSavedTaxonomyNodeIds(nodeIds)
+        setSavedTaxonomyNodeTaxonomyIds(taxonomyIdMap)
+
+        if (nodeIds.length > 0) {
+          const labels = nodeIds.map((id) => {
+            const node = nodesById.get(String(id))
+            if (!node) return `Saved taxonomy node (${id})`
+            const path = [node.name]
+            let parentId = node.parentId ? String(node.parentId) : ''
+            const visited = new Set<string>([String(node.id)])
+            while (parentId && !visited.has(parentId)) {
+              visited.add(parentId)
+              const parent = nodesById.get(parentId)
+              if (!parent) break
+              path.unshift(parent.name)
+              parentId = parent.parentId ? String(parent.parentId) : ''
+            }
+            const taxonomyName = taxonomyNames.get(String(node.taxonomyId))
+            return taxonomyName ? `${taxonomyName}: ${path.join(' › ')}` : path.join(' › ')
+          })
+          setSavedGenericTaxonomyLabels(Array.from(new Set(labels)))
+
+          // The persisted assignment is represented by the deepest selected
+          // node. Derive the visible hierarchy from its ancestry.
+          const primaryNode = nodesById.get(String(nodeIds[0]))
+          if (primaryNode) {
+            const path: typeof primaryNode[] = []
+            let cursor: typeof primaryNode | undefined = primaryNode
+            const visited = new Set<string>()
+            while (cursor && !visited.has(String(cursor.id))) {
+              visited.add(String(cursor.id))
+              path.unshift(cursor)
+              cursor = cursor.parentId ? nodesById.get(String(cursor.parentId)) : undefined
+            }
+            if (path[0]) setDomain(path[0].name)
+            if (path[1]) setChapter(path[1].name)
+            if (path[2]) setLesson(path[2].name)
+          }
+        }
+      } catch (error) {
+        // Never clear valid persisted editor state because an auxiliary request
+        // failed. Keep the question editable and surface the error in logs.
+        console.error('[Question Editor] Failed to hydrate persisted context:', error)
+      } finally {
+        if (!cancelled) {
+          setIsLoadingSavedTaxonomy(false)
+          isQuestionLoadedRef.current = true
+          setIsEditorHydrated(true)
+        }
+      }
+    }
+
+    void hydrateQuestion()
+    return () => {
+      cancelled = true
     }
   }, [questionId, queryCollection])
 
   // Default domain, chapter, lesson for a new question when taxonomyData is populated
   useEffect(() => {
     if (isEditing) return
-    const domainKeys = Object.keys(taxonomyData)
+    const domainKeys = Object.keys(editorTaxonomyData)
     if (domainKeys.length === 0) {
       if (!isCustomDomain) setDomain('')
       if (!isCustomChapter) setChapter('')
@@ -243,15 +719,22 @@ export const CreateQuestionPage: React.FC = () => {
     }
 
     // If current domain is empty or invalid, select the first valid domain from DB
-    if (!isCustomDomain && (!domain || !taxonomyData[domain])) {
+    if (!isCustomDomain && (!domain || !editorTaxonomyData[domain])) {
       const firstDom = domainKeys[0]
       setDomain(firstDom)
-      const chapters = taxonomyData[firstDom]?.chapters || []
+      const chapters = editorTaxonomyData[firstDom]?.chapters || []
       if (!isCustomChapter) {
         if (chapters.length > 0) {
           setChapter(chapters[0].name)
           if (!isCustomLesson) {
-            setLesson(chapters[0].lessons?.[0] || '')
+            const firstLesson = chapters[0].lessons?.[0] as unknown
+            const firstLessonName =
+              typeof firstLesson === 'string'
+                ? firstLesson
+                : firstLesson && typeof firstLesson === 'object' && 'name' in firstLesson
+                ? String((firstLesson as { name?: unknown }).name ?? '')
+                : ''
+            setLesson(firstLessonName)
           }
         } else {
           setChapter('')
@@ -259,34 +742,52 @@ export const CreateQuestionPage: React.FC = () => {
         }
       }
     }
-  }, [taxonomyData, isEditing, isCustomDomain, isCustomChapter, isCustomLesson])
+  }, [editorTaxonomyData, isEditing, isCustomDomain, isCustomChapter, isCustomLesson])
 
-  const handleQuickCreateCollection = (e?: React.FormEvent) => {
+  const handleQuickCreateCollection = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
+    if (quickCollectionInFlightRef.current) return
     setQuickColError(null)
-    if (!quickColName.trim()) {
+    setQuickColSuccess(null)
+
+    const name = quickColName.trim()
+    if (!name) {
       setQuickColError('Collection name cannot be empty.')
       return
     }
 
-    const res = questionBankService.createCollection(
-      quickColName.trim(),
-      quickColDesc.trim(),
-      quickColTargetExam
-    )
+    quickCollectionInFlightRef.current = true
+    setIsSavingQuickCollection(true)
 
-    if (!res.success) {
-      setQuickColError(res.error || 'Failed to create collection.')
-      return
+    try {
+      // Persist to Supabase before closing the modal or showing success.
+      const res = await questionBankService.createCollectionAndPersist(
+        name,
+        quickColDesc.trim()
+      )
+
+      if (!res.success || !res.collection) {
+        setQuickColError(res.error || 'Could not save the collection. Please try again.')
+        return
+      }
+
+      // Re-read the authoritative database-backed collection list so this page
+      // and the Question Bank page see the same saved collections.
+      const savedCollections = await questionBankService.fetchCollectionsFromDatabase()
+      const updatedList = Array.from(new Set(savedCollections.map((item) => item.name)))
+      setExistingCollections(updatedList)
+      setCollection(res.collection.name)
+      setIsQuickCollectionModalOpen(false)
+      setQuickColName('')
+      setQuickColDesc('')
+      setQuickColSuccess(`Collection "${res.collection.name}" created and selected successfully.`)
+      window.setTimeout(() => setQuickColSuccess(null), 4500)
+    } catch (error: any) {
+      setQuickColError(error?.message || 'Could not save the collection. Please try again.')
+    } finally {
+      quickCollectionInFlightRef.current = false
+      setIsSavingQuickCollection(false)
     }
-
-    const createdName = res.collection!.name
-    const updatedList = questionBankService.getCollectionsList().map((c) => c.name)
-    setExistingCollections(updatedList)
-    setCollection(createdName)
-    setIsQuickCollectionModalOpen(false)
-    setQuickColName('')
-    setQuickColDesc('')
   }
 
   // Update chapters only when user changes domain interactively
@@ -296,12 +797,14 @@ export const CreateQuestionPage: React.FC = () => {
     if (isEditing && !isQuestionLoadedRef.current) return
     if (initialDomainRef.current === domain) return
 
-    const domainData = domain ? taxonomyData[domain] : null
+    const domainData = domain ? editorTaxonomyData[domain] : null
+    if (isEditing && isQuestionLoadedRef.current && !domainData) return
     if (domainData && domainData.chapters && domainData.chapters.length > 0) {
       const defaultChapter = domainData.chapters[0].name
       setChapter(defaultChapter)
       if (!isCustomLesson) {
-        setLesson(domainData.chapters[0].lessons?.[0] || '')
+        const firstLesson = domainData.chapters[0].lessons?.[0]
+        setLesson(firstLesson ? (typeof firstLesson === 'string' ? firstLesson : firstLesson.name) : '')
       }
     } else {
       setChapter('')
@@ -309,46 +812,235 @@ export const CreateQuestionPage: React.FC = () => {
         setLesson('')
       }
     }
-  }, [domain, isCustomChapter, isCustomLesson, taxonomyData, isEditing])
+  }, [domain, isCustomChapter, isCustomLesson, editorTaxonomyData, isEditing])
 
   // Update lessons when chapter changes interactively
   useEffect(() => {
     if (isCustomLesson || isCustomChapter) return
     if (isEditing && !isQuestionLoadedRef.current) return
 
-    const domainData = domain ? taxonomyData[domain] : null
+    const domainData = domain ? editorTaxonomyData[domain] : null
     const matched = domainData?.chapters?.find((c: any) => c.name === chapter)
+    if (isEditing && isQuestionLoadedRef.current && !matched) return
     if (matched && matched.lessons && matched.lessons.length > 0) {
       // Keep existing lesson if valid in this chapter, otherwise pick first
-      if (!matched.lessons.includes(lesson)) {
-        setLesson(matched.lessons[0])
+      const lessonNames = matched.lessons.map((item: any) => typeof item === 'string' ? item : item.name)
+      if (!lessonNames.includes(lesson)) {
+        const firstLesson = matched.lessons[0]
+        setLesson(typeof firstLesson === 'string' ? firstLesson : firstLesson.name)
       }
     } else {
       setLesson('')
     }
-  }, [chapter, domain, isCustomLesson, isCustomChapter, taxonomyData, isEditing, lesson])
+  }, [chapter, domain, isCustomLesson, isCustomChapter, editorTaxonomyData, isEditing, lesson])
 
-  // Explicit handlers to create and save custom domain, chapter, and lesson to taxonomy database using Unit of Work
+  const handleQuestionTaxonomyChange = async (taxonomyId: string) => {
+    const currentTaxonomyId = selectedQuestionTaxonomyId || customTaxonomyId
+    if (taxonomyId !== currentTaxonomyId && draftTaxonomyNodes.length > 0) {
+      setFormError('You have pending custom Domain / Chapter / Lesson items. Save the question or discard those changes before switching taxonomy.')
+      return
+    }
+
+    setSelectedQuestionTaxonomyId(taxonomyId)
+    setCustomTaxonomyId(taxonomyId)
+    setFormError(null)
+
+    if (!taxonomyId) {
+      setSelectedTaxonomyNodes([])
+      setSavedTaxonomyNodeIds([])
+      setDomain('')
+      setChapter('')
+      setLesson('')
+      setHasUnsavedChanges(true)
+      return
+    }
+
+    try {
+      // The selected taxonomy is the sole source for the Domain / Chapter /
+      // Lesson selectors. Never fall back to the global legacy taxonomy here.
+      const nodes = await questionBankService.fetchGenericTaxonomyNodes(taxonomyId)
+      setSelectedTaxonomyNodes(nodes || [])
+
+      const byId = new Map((nodes || []).map((node: any) => [String(node.id), node]))
+      const roots = (nodes || []).filter((node: any) => !node.parentId)
+      const normalized = (value: string) => value.trim().toLowerCase()
+
+      const currentRoot = roots.find((node: any) => normalized(node.name) === normalized(domain))
+      const domainNode = currentRoot || roots[0]
+
+      // Keep these outside the conditional so the exact hierarchy selected above
+      // is also available when rebuilding the taxonomy assignment below.
+      let selectedChapterNode: any = null
+      let selectedLessonNode: any = null
+
+      if (domainNode) {
+        const chapters = (nodes || []).filter(
+          (node: any) => String(node.parentId || '') === String(domainNode.id)
+        )
+        const currentChapter = chapters.find((node: any) => normalized(node.name) === normalized(chapter))
+        selectedChapterNode = currentChapter || chapters[0] || null
+
+        const lessons = selectedChapterNode
+          ? (nodes || []).filter(
+              (node: any) => String(node.parentId || '') === String(selectedChapterNode.id)
+            )
+          : []
+        const currentLesson = lessons.find((node: any) => normalized(node.name) === normalized(lesson))
+        selectedLessonNode = currentLesson || lessons[0] || null
+
+        setDomain(String(domainNode.name))
+        setChapter(selectedChapterNode ? String(selectedChapterNode.name) : '')
+        setLesson(selectedLessonNode ? String(selectedLessonNode.name) : '')
+      } else {
+        setDomain('')
+        setChapter('')
+        setLesson('')
+      }
+
+      // Keep the question's generic assignment aligned with the exact selected
+      // Domain -> Chapter -> Lesson path, but only inside this taxonomy.
+      // Use the newly selected hierarchy values instead of stale React state.
+      const selectedDomain = domainNode?.name ? String(domainNode.name) : ''
+      const selectedChapter = selectedChapterNode?.name ? String(selectedChapterNode.name) : ''
+      const selectedLesson = selectedLessonNode?.name ? String(selectedLessonNode.name) : ''
+      const target = [selectedDomain, selectedChapter, selectedLesson].filter(Boolean)
+
+      const candidates = (nodes || [])
+        .filter((node: any) => node.isActive !== false)
+        .filter((node: any) => {
+          const names: string[] = [String(node.name || '')]
+          let parentId = node.parentId ? String(node.parentId) : ''
+          const visited = new Set<string>([String(node.id)])
+          while (parentId && !visited.has(parentId)) {
+            visited.add(parentId)
+            const parent = byId.get(parentId)
+            if (!parent) break
+            names.unshift(String(parent.name || ''))
+            parentId = parent.parentId ? String(parent.parentId) : ''
+          }
+          if (names.length < target.length) return false
+          const tail = names.slice(-target.length)
+          return tail.every((name, index) => normalized(name) === normalized(target[index]))
+        })
+        .sort((a: any, b: any) => Number(b.sortOrder || 0) - Number(a.sortOrder || 0))
+
+      if (candidates[0]) {
+        setSavedTaxonomyNodeIds([String(candidates[0].id)])
+        setSavedTaxonomyNodeTaxonomyIds({ [String(candidates[0].id)]: taxonomyId })
+      } else {
+        setSavedTaxonomyNodeIds([])
+        setSavedTaxonomyNodeTaxonomyIds({})
+      }
+      setHasUnsavedChanges(true)
+    } catch (error: any) {
+      setFormError(error?.message || 'Could not load the selected taxonomy.')
+    }
+  }
+
+  const syncGenericAssignmentFromPath = (nextDomain: string, nextChapter: string, nextLesson: string) => {
+    const taxonomyId = selectedQuestionTaxonomyId || customTaxonomyId
+    if (!taxonomyId || selectedTaxonomyNodes.length === 0) return
+
+    const normalized = (value: unknown) => String(value ?? '').trim().toLowerCase()
+    const nodes = selectedTaxonomyNodes.filter(
+      (node: any) => String(node.taxonomyId || '') === String(taxonomyId)
+    )
+    const domainNode = nodes.find(
+      (node: any) => !node.parentId && normalized(node.name) === normalized(nextDomain)
+    )
+    if (!domainNode) return
+
+    const chapterNode = nodes.find(
+      (node: any) => String(node.parentId || '') === String(domainNode.id) &&
+        normalized(node.name) === normalized(nextChapter)
+    )
+    if (!chapterNode) {
+      setSavedTaxonomyNodeIds([String(domainNode.id)])
+      setSavedTaxonomyNodeTaxonomyIds({ [String(domainNode.id)]: String(taxonomyId) })
+      return
+    }
+
+    const lessonNode = nodes.find(
+      (node: any) => String(node.parentId || '') === String(chapterNode.id) &&
+        normalized(node.name) === normalized(nextLesson)
+    )
+    const targetNode = lessonNode || chapterNode
+    setSavedTaxonomyNodeIds([String(targetNode.id)])
+    setSavedTaxonomyNodeTaxonomyIds({ [String(targetNode.id)]: String(taxonomyId) })
+  }
+
+  const addDraftDomain = (taxonomyId: string, name: string) => {
+    setDraftTaxonomyNodes((current) => {
+      const withoutSame = current.filter(
+        (node) => !(node.taxonomyId === taxonomyId && node.type === 'domain' && node.domain.toLowerCase() === name.toLowerCase())
+      )
+      return [...withoutSame, { taxonomyId, type: 'domain', domain: name }]
+    })
+    setDraftTaxonomyData((current) => ({
+      ...current,
+      [name]: current[name] || { unitLabel: `Unit: ${name}`, code: '', chapters: [] },
+    }))
+  }
+
+  const addDraftChapter = (taxonomyId: string, domainName: string, chapterName: string) => {
+    setDraftTaxonomyNodes((current) => {
+      const withoutSame = current.filter(
+        (node) => !(node.taxonomyId === taxonomyId && node.type === 'chapter' && node.domain.toLowerCase() === domainName.toLowerCase() && node.chapter?.toLowerCase() === chapterName.toLowerCase())
+      )
+      return [...withoutSame, { taxonomyId, type: 'chapter', domain: domainName, chapter: chapterName }]
+    })
+    setDraftTaxonomyData((current) => {
+      const domainData = current[domainName] || { unitLabel: `Unit: ${domainName}`, code: '', chapters: [] }
+      const chapters = [...(domainData.chapters || [])]
+      if (!chapters.some((item: any) => item.name.toLowerCase() === chapterName.toLowerCase())) {
+        chapters.push({ name: chapterName, code: '', lessons: [] })
+      }
+      return { ...current, [domainName]: { ...domainData, chapters } }
+    })
+  }
+
+  const addDraftLesson = (taxonomyId: string, domainName: string, chapterName: string, lessonName: string) => {
+    setDraftTaxonomyNodes((current) => {
+      const withoutSame = current.filter(
+        (node) => !(node.taxonomyId === taxonomyId && node.type === 'lesson' && node.domain.toLowerCase() === domainName.toLowerCase() && node.chapter?.toLowerCase() === chapterName.toLowerCase() && node.lesson?.toLowerCase() === lessonName.toLowerCase())
+      )
+      return [...withoutSame, { taxonomyId, type: 'lesson', domain: domainName, chapter: chapterName, lesson: lessonName }]
+    })
+    setDraftTaxonomyData((current) => {
+      const domainData = current[domainName] || { unitLabel: `Unit: ${domainName}`, code: '', chapters: [] }
+      const chapters = [...(domainData.chapters || [])]
+      let target = chapters.find((item: any) => item.name.toLowerCase() === chapterName.toLowerCase())
+      if (!target) {
+        target = { name: chapterName, code: '', lessons: [] }
+        chapters.push(target)
+      }
+      if (!target.lessons.some((item: string) => item.toLowerCase() === lessonName.toLowerCase())) {
+        target.lessons = [...target.lessons, lessonName]
+      }
+      return { ...current, [domainName]: { ...domainData, chapters } }
+    })
+  }
+
   const handleCreateCustomDomain = async () => {
     const trimmed = domain.trim()
     if (!trimmed || isCreatingDomain) return
+    if (!customTaxonomyId) { setFormError('Select a taxonomy before creating a custom domain.'); return }
     setIsCreatingDomain(true)
     setCustomTaxonomyFeedback(null)
     try {
-      await executeUnitOfWork((uow) => {
-        uow.registerNewDomain(trimmed)
-      })
-      const freshTax = await questionBankService.fetchTaxonomy()
-      setTaxonomyData(freshTax || questionBankService.getTaxonomy() || {})
+      addDraftDomain(customTaxonomyId, trimmed)
       setIsCustomDomain(false)
+      setIsCustomChapter(true)
+      setIsCustomLesson(true)
       setDomain(trimmed)
+      setChapter('')
+      setLesson('')
+      setHasUnsavedChanges(true)
       setCustomTaxonomyFeedback({
         field: 'domain',
-        message: `Domain "${trimmed}" created and saved to taxonomy!`,
+        message: `Domain "${trimmed}" is ready and selected. It will be created when you save the question.`,
       })
-      setTimeout(() => setCustomTaxonomyFeedback(null), 3500)
-    } catch (err: any) {
-      setFormError(`Failed to save domain to database: ${err?.message || 'Error occurred'}`)
+      setTimeout(() => setCustomTaxonomyFeedback(null), 4500)
     } finally {
       setIsCreatingDomain(false)
     }
@@ -358,6 +1050,7 @@ export const CreateQuestionPage: React.FC = () => {
     const trimmedChap = chapter.trim()
     const trimmedDom = domain.trim()
     if (!trimmedChap || isCreatingChapter) return
+    if (!customTaxonomyId) { setFormError('Select a taxonomy before creating a custom chapter.'); return }
     if (!trimmedDom) {
       setFormError('Please select or specify a Domain first before adding a Chapter.')
       return
@@ -365,24 +1058,17 @@ export const CreateQuestionPage: React.FC = () => {
     setIsCreatingChapter(true)
     setCustomTaxonomyFeedback(null)
     try {
-      const curTax = questionBankService.getTaxonomy() || {}
-      await executeUnitOfWork((uow) => {
-        if (!curTax[trimmedDom]) {
-          uow.registerNewDomain(trimmedDom)
-        }
-        uow.registerNewChapter(trimmedDom, trimmedChap)
-      })
-      const freshTax = await questionBankService.fetchTaxonomy()
-      setTaxonomyData(freshTax || questionBankService.getTaxonomy() || {})
+      addDraftChapter(customTaxonomyId, trimmedDom, trimmedChap)
       setIsCustomChapter(false)
+      setIsCustomLesson(true)
       setChapter(trimmedChap)
+      setLesson('')
+      setHasUnsavedChanges(true)
       setCustomTaxonomyFeedback({
         field: 'chapter',
-        message: `Chapter "${trimmedChap}" created and saved to taxonomy under ${trimmedDom}!`,
+        message: `Chapter "${trimmedChap}" is ready under ${trimmedDom}. It will be created when you save the question.`,
       })
-      setTimeout(() => setCustomTaxonomyFeedback(null), 3500)
-    } catch (err: any) {
-      setFormError(`Failed to save chapter to database: ${err?.message || 'Error occurred'}`)
+      setTimeout(() => setCustomTaxonomyFeedback(null), 4500)
     } finally {
       setIsCreatingChapter(false)
     }
@@ -393,6 +1079,7 @@ export const CreateQuestionPage: React.FC = () => {
     const trimmedChap = chapter.trim()
     const trimmedDom = domain.trim()
     if (!trimmedLess || isCreatingLesson) return
+    if (!customTaxonomyId) { setFormError('Select a taxonomy before creating a custom lesson.'); return }
     if (!trimmedDom) {
       setFormError('Please select or specify a Domain first before adding a Lesson.')
       return
@@ -404,33 +1091,100 @@ export const CreateQuestionPage: React.FC = () => {
     setIsCreatingLesson(true)
     setCustomTaxonomyFeedback(null)
     try {
-      const curTax = questionBankService.getTaxonomy() || {}
-      await executeUnitOfWork((uow) => {
-        if (!curTax[trimmedDom]) {
-          uow.registerNewDomain(trimmedDom)
-        }
-        const hasChap = curTax[trimmedDom]?.chapters?.some(
-          (c: any) => c.name.toLowerCase() === trimmedChap.toLowerCase()
-        )
-        if (!hasChap) {
-          uow.registerNewChapter(trimmedDom, trimmedChap)
-        }
-        uow.registerNewLesson(trimmedDom, trimmedChap, trimmedLess)
-      })
-      const freshTax = await questionBankService.fetchTaxonomy()
-      setTaxonomyData(freshTax || questionBankService.getTaxonomy() || {})
+      addDraftLesson(customTaxonomyId, trimmedDom, trimmedChap, trimmedLess)
       setIsCustomLesson(false)
       setLesson(trimmedLess)
+      setHasUnsavedChanges(true)
       setCustomTaxonomyFeedback({
         field: 'lesson',
-        message: `Lesson "${trimmedLess}" created and saved to taxonomy under ${trimmedChap}!`,
+        message: `Lesson "${trimmedLess}" is ready under ${trimmedChap}. It will be created when you save the question.`,
       })
-      setTimeout(() => setCustomTaxonomyFeedback(null), 3500)
-    } catch (err: any) {
-      setFormError(`Failed to save lesson to database: ${err?.message || 'Error occurred'}`)
+      setTimeout(() => setCustomTaxonomyFeedback(null), 4500)
     } finally {
       setIsCreatingLesson(false)
     }
+  }
+
+  const persistDraftTaxonomy = async (): Promise<{ taxonomyNodeIds: string[]; createdNodeIds: string[] }> => {
+    if (draftTaxonomyNodes.length === 0) {
+      // No new custom nodes are being staged. Preserve the question's existing
+      // persisted taxonomy assignment instead of accidentally clearing it.
+      // This is especially important when editing a question and changing only
+      // its content.
+      return {
+        taxonomyNodeIds: Array.from(new Set(savedTaxonomyNodeIds.map(String).filter(Boolean))),
+        createdNodeIds: [],
+      }
+    }
+
+    const createdNodeIds: string[] = []
+    const selectedIdsByTaxonomy = new Map<string, string[]>()
+    const sorted = [...draftTaxonomyNodes].sort((a, b) => {
+      const order = { domain: 0, chapter: 1, lesson: 2 }
+      return order[a.type] - order[b.type]
+    })
+
+    for (const draft of sorted) {
+      const before = await questionBankService.fetchGenericTaxonomyNodes(draft.taxonomyId)
+      const beforeIds = new Set(before.map((node) => String(node.id)))
+
+      if (draft.type === 'domain') {
+        await questionBankService.addDomain(draft.domain, undefined, undefined, draft.taxonomyId)
+      } else if (draft.type === 'chapter') {
+        await questionBankService.addChapter(draft.domain, draft.chapter || '', undefined, draft.taxonomyId)
+      } else {
+        await questionBankService.addLesson(draft.domain, draft.chapter || '', draft.lesson || '', draft.taxonomyId)
+      }
+
+      const after = await questionBankService.fetchGenericTaxonomyNodes(draft.taxonomyId)
+      let target: any
+      if (draft.type === 'domain') {
+        target = after.find((node) => !node.parentId && node.name.trim().toLowerCase() === draft.domain.trim().toLowerCase())
+      } else if (draft.type === 'chapter') {
+        const domainNode = after.find((node) => !node.parentId && node.name.trim().toLowerCase() === draft.domain.trim().toLowerCase())
+        target = after.find((node) => node.parentId === domainNode?.id && node.name.trim().toLowerCase() === (draft.chapter || '').trim().toLowerCase())
+      } else {
+        const domainNode = after.find((node) => !node.parentId && node.name.trim().toLowerCase() === draft.domain.trim().toLowerCase())
+        const chapterNode = after.find((node) => node.parentId === domainNode?.id && node.name.trim().toLowerCase() === (draft.chapter || '').trim().toLowerCase())
+        target = after.find((node) => node.parentId === chapterNode?.id && node.name.trim().toLowerCase() === (draft.lesson || '').trim().toLowerCase())
+      }
+      if (!target) throw new Error(`Could not resolve the newly created ${draft.type} in the selected taxonomy.`)
+
+      const targetId = String(target.id)
+      if (!beforeIds.has(targetId)) createdNodeIds.push(targetId)
+      const ids = selectedIdsByTaxonomy.get(draft.taxonomyId) || []
+      if (!ids.includes(targetId)) ids.push(targetId)
+      selectedIdsByTaxonomy.set(draft.taxonomyId, ids)
+    }
+
+    const nextIds = [...savedTaxonomyNodeIds]
+    const taxonomyIdsToReplace = new Set(sorted.map((draft) => draft.taxonomyId))
+    const preserved = nextIds.filter((id) => !taxonomyIdsToReplace.has(savedTaxonomyNodeTaxonomyIds[id]))
+    const finalIds = [...preserved]
+    for (const ids of selectedIdsByTaxonomy.values()) {
+      for (const id of ids) if (!finalIds.includes(id)) finalIds.push(id)
+    }
+
+    return { taxonomyNodeIds: finalIds, createdNodeIds }
+  }
+
+  const rollbackCreatedTaxonomyNodes = async (createdNodeIds: string[]) => {
+    if (createdNodeIds.length === 0) return
+    try {
+      await supabase.from('question_taxonomy_nodes').delete().in('taxonomy_node_id', createdNodeIds)
+      await supabase.from('taxonomy_nodes').delete().in('id', [...createdNodeIds].reverse())
+    } catch (error) {
+      console.error('[Question Edit] Failed to rollback draft taxonomy nodes:', error)
+    }
+  }
+
+  const discardUnsavedChanges = () => {
+    setDraftTaxonomyNodes([])
+    setDraftTaxonomyData({})
+    setCustomTaxonomyFeedback(null)
+    setSelectedQuestionTaxonomyId(initialQuestionTaxonomyIdRef.current)
+    setCustomTaxonomyId(initialQuestionTaxonomyIdRef.current)
+    setHasUnsavedChanges(false)
   }
 
   // Active target label computation
@@ -659,26 +1413,40 @@ export const CreateQuestionPage: React.FC = () => {
   const persistQuestion = async (): Promise<QuestionBankItem> => {
     setFormError(null)
 
+    // Taxonomy hierarchy is mandatory for every newly authored/edited question.
+    // We validate the parent taxonomy and the visible Domain -> Chapter -> Lesson
+    // path before any database write or staged taxonomy creation can occur.
+    const activeTaxonomyId = String(selectedQuestionTaxonomyId || customTaxonomyId || '').trim()
+    if (!activeTaxonomyId) {
+      const message = 'Please select a Taxonomy before saving the question.'
+      setFormError(message)
+      throw new Error(message)
+    }
+
+    const trimmedDomainForValidation = domain.trim()
+    const trimmedChapterForValidation = chapter.trim()
+    const trimmedLessonForValidation = lesson.trim()
+
+    if (!trimmedDomainForValidation) {
+      const message = 'Please select or create a Domain for the selected Taxonomy.'
+      setFormError(message)
+      throw new Error(message)
+    }
+
+    if (!trimmedChapterForValidation) {
+      const message = 'Please select or create a Chapter under the selected Domain.'
+      setFormError(message)
+      throw new Error(message)
+    }
+
+    if (!trimmedLessonForValidation) {
+      const message = 'Please select or create a Lesson under the selected Chapter.'
+      setFormError(message)
+      throw new Error(message)
+    }
+
     if (!prompt.trim()) {
       const message = 'Question Prompt / Stem is mandatory.'
-      setFormError(message)
-      throw new Error(message)
-    }
-
-    if (!domain.trim()) {
-      const message = 'Domain / Category is mandatory. Please select or enter a valid domain.'
-      setFormError(message)
-      throw new Error(message)
-    }
-
-    if (!chapter.trim()) {
-      const message = 'Chapter is mandatory. Please select or enter a chapter.'
-      setFormError(message)
-      throw new Error(message)
-    }
-
-    if (!lesson.trim()) {
-      const message = 'Lesson is mandatory. Please select or enter a lesson.'
       setFormError(message)
       throw new Error(message)
     }
@@ -715,9 +1483,24 @@ export const CreateQuestionPage: React.FC = () => {
         setFormError(message)
         throw new Error(message)
       }
+      if (questionType === 'multiple_choice' && correctCount !== 1) {
+        const message = 'Single-choice questions must have exactly one correct answer.'
+        setFormError(message)
+        throw new Error(message)
+      }
     } else if (questionType === 'grid_in') {
-      if (!numericAnswer.trim()) {
-        const message = 'Please specify the accepted numeric answer for this grid-in question.'
+      if (parseNumericAnswer(numericAnswer) === null) {
+        const message = 'Enter a valid finite numeric answer (for example 2.5 or 5/2).'
+        setFormError(message)
+        throw new Error(message)
+      }
+      if (numericAlternateAnswers.split(/[,\n]/).some(answer => answer.trim() && parseNumericAnswer(answer.trim()) === null)) {
+        const message = 'Each alternative answer must be a valid number or fraction.'
+        setFormError(message)
+        throw new Error(message)
+      }
+      if (parseNumericTolerance(numericTolerance) === null) {
+        const message = 'Tolerance must be a nonnegative number.'
         setFormError(message)
         throw new Error(message)
       }
@@ -738,6 +1521,22 @@ export const CreateQuestionPage: React.FC = () => {
     const trimmedChapter = chapter.trim()
     const trimmedLesson = lesson.trim()
 
+    if (isCustomDomain && !draftTaxonomyNodes.some((node) => node.taxonomyId === (selectedQuestionTaxonomyId || customTaxonomyId) && node.type === 'domain' && node.domain.toLowerCase() === trimmedDomain.toLowerCase())) {
+      const message = 'Click Save Domain before saving this question.'
+      setFormError(message)
+      throw new Error(message)
+    }
+    if (isCustomChapter && !draftTaxonomyNodes.some((node) => node.taxonomyId === (selectedQuestionTaxonomyId || customTaxonomyId) && node.type === 'chapter' && node.domain.toLowerCase() === trimmedDomain.toLowerCase() && node.chapter?.toLowerCase() === trimmedChapter.toLowerCase())) {
+      const message = 'Click Save Chapter before saving this question.'
+      setFormError(message)
+      throw new Error(message)
+    }
+    if (isCustomLesson && !draftTaxonomyNodes.some((node) => node.taxonomyId === (selectedQuestionTaxonomyId || customTaxonomyId) && node.type === 'lesson' && node.domain.toLowerCase() === trimmedDomain.toLowerCase() && node.chapter?.toLowerCase() === trimmedChapter.toLowerCase() && node.lesson?.toLowerCase() === trimmedLesson.toLowerCase())) {
+      const message = 'Click Save Lesson before saving this question.'
+      setFormError(message)
+      throw new Error(message)
+    }
+
     const questionItem: QuestionBankItem = {
       id: questionId || generateUUID(),
       collection: collection.trim() || 'General Question Bank',
@@ -754,79 +1553,152 @@ export const CreateQuestionPage: React.FC = () => {
       imageCaption,
       choices: questionType === 'grid_in' ? [] : choices.filter((c) => c.text.trim().length > 0),
       numericAnswer: questionType === 'grid_in' ? numericAnswer.trim() : undefined,
+      numericAlternateAnswers: questionType === 'grid_in' ? numericAlternateAnswers.split(/[,\n]/).map(a => a.trim()).filter(Boolean) : undefined,
       numericTolerance: questionType === 'grid_in' ? numericTolerance : undefined,
       explanation: explanation.trim(),
       commonMisconception: commonMisconception.trim(),
+      taxonomyNodeIds: Array.from(new Set(savedTaxonomyNodeIds.map(String).filter(Boolean))),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }
 
-    // Atomically execute Unit of Work:
-    // Staging domain, chapter, lesson in taxonomy (if custom/new) AND saving the question in a single database transaction
-    await executeUnitOfWork((uow) => {
-      const curTax = questionBankService.getTaxonomy() || {}
-      if (!curTax[trimmedDomain]) {
-        uow.registerNewDomain(trimmedDomain)
-      }
+    let createdDraftNodeIds: string[] = []
+    try {
+      const draftResult = await persistDraftTaxonomy()
+      questionItem.taxonomyNodeIds = draftResult.taxonomyNodeIds
+      createdDraftNodeIds = draftResult.createdNodeIds
 
-      const hasChap = curTax[trimmedDomain]?.chapters?.some(
-        (c: any) => c.name.toLowerCase() === trimmedChapter.toLowerCase()
-      )
-      if (!hasChap) {
-        uow.registerNewChapter(trimmedDomain, trimmedChapter)
-      }
+      // The generic taxonomy relationship model is authoritative.
+    // When generic taxonomyNodeIds is present, do not create or mutate legacy
+    // Domain/Chapter/Lesson taxonomy records as a side effect of saving a question.
+    // Keep the legacy taxonomy staging path only for older callers that do not
+    // provide generic taxonomy mappings.
+    if (Array.isArray(questionItem.taxonomyNodeIds)) {
+      await executeUnitOfWork((uow) => {
+        uow.registerQuestion(questionItem)
+      })
+    } else {
+      await executeUnitOfWork((uow) => {
+        const curTax = questionBankService.getTaxonomy() || {}
+        if (!curTax[trimmedDomain]) {
+          uow.registerNewDomain(trimmedDomain)
+        }
 
-      const chapObj = curTax[trimmedDomain]?.chapters?.find(
-        (c: any) => c.name.toLowerCase() === trimmedChapter.toLowerCase()
-      )
-      const hasLesson = chapObj?.lessons?.some(
-        (l: string) => l.toLowerCase() === trimmedLesson.toLowerCase()
-      )
-      if (!hasLesson) {
-        uow.registerNewLesson(trimmedDomain, trimmedChapter, trimmedLesson)
-      }
+        const hasChap = curTax[trimmedDomain]?.chapters?.some(
+          (c: any) => c.name.toLowerCase() === trimmedChapter.toLowerCase()
+        )
+        if (!hasChap) {
+          uow.registerNewChapter(trimmedDomain, trimmedChapter)
+        }
 
-      uow.registerQuestion(questionItem)
-    })
+        const chapObj = curTax[trimmedDomain]?.chapters?.find(
+          (c: any) => c.name.toLowerCase() === trimmedChapter.toLowerCase()
+        )
+        const hasLesson = chapObj?.lessons?.some(
+          (l: string) => l.toLowerCase() === trimmedLesson.toLowerCase()
+        )
+        if (!hasLesson) {
+          uow.registerNewLesson(trimmedDomain, trimmedChapter, trimmedLesson)
+        }
 
-    // Also sync to Supabase in background if configured
-    questionBankService.syncQuestionToDatabase(questionItem).catch((taxErr) => {
-      console.warn('Notice syncing question to secondary storage:', taxErr)
-    })
+        uow.registerQuestion(questionItem)
+      })
+    }
 
-    return questionItem
+      // Sync to Supabase so the generic question_taxonomy_nodes relationships
+      // are saved together with the question. Legacy taxonomy fields remain intact.
+      await questionBankService.syncQuestionToDatabase(questionItem)
+
+      return questionItem
+    } catch (error) {
+      // The draft taxonomy was not meant to exist independently of this question.
+      // If saving fails, remove only nodes created by this edit attempt.
+      await rollbackCreatedTaxonomyNodes(createdDraftNodeIds)
+      throw error
+    }
   }
 
-  const saveBeforeNavigation = () => {
-    persistQuestion().then(() => {
+  const saveBeforeNavigation = async () => {
+    setIsSaving(true)
+    setFormError(null)
+    setSaveSuccessMessage(null)
+    try {
+      await persistQuestion()
+      initialEditorSnapshotRef.current = editorSnapshot
+      saveCompletedRef.current = false
       markClean()
       setHasUnsavedChanges(false)
-    }).catch(() => {})
+      setSaveSuccessMessage('Changes saved successfully.')
+    } catch (err: any) {
+      console.error('Save before navigation failed:', err)
+      throw new Error(err?.message || 'Could not save your changes before leaving this page.')
+    } finally {
+      setIsSaving(false)
+    }
   }
-  const markClean = useUnsavedChanges(hasUnsavedChanges, saveBeforeNavigation)
+  const markClean = useUnsavedChanges(hasUnsavedChanges, saveBeforeNavigation, discardUnsavedChanges)
+
+  const focusFieldForSaveError = (message: string) => {
+    const lower = message.toLowerCase()
+    let target: HTMLElement | null = null
+    if (lower.includes('prompt') || lower.includes('stem')) target = promptTextareaRef.current
+    else if (lower.includes('collection')) target = document.querySelector('[aria-label="Question Collection / Test Pool"]') as HTMLElement | null
+    else if (lower.includes('target exam')) target = document.querySelector('input[placeholder*="exam" i], select[aria-label*="exam" i]') as HTMLElement | null
+    else if (lower.includes('time estimate') || lower.includes('seconds')) target = document.querySelector('input[type="number"]') as HTMLElement | null
+    else if (lower.includes('choice') || lower.includes('answer key') || lower.includes('correct answer')) target = Object.values(choiceInputRefs.current).find((el) => el) || null
+    else if (lower.includes('grid-in') || lower.includes('numeric answer')) target = document.querySelector('input[placeholder*="numeric" i], input[aria-label*="numeric" i]') as HTMLElement | null
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      window.setTimeout(() => target?.focus(), 250)
+    } else {
+      const banner = document.getElementById('question-save-feedback')
+      banner?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }
 
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
-    if (isSaving) return
+    if (saveQuestionInFlightRef.current || isSaving) return
+    saveQuestionInFlightRef.current = true
+    saveCompletedRef.current = false
     setIsSaving(true)
     setFormError(null)
+    setSaveSuccessMessage(null)
 
     try {
       const saved = await persistQuestion()
-      markClean()
+
+      // The database save succeeded: lock the editor's dirty tracking before
+      // clearing the context guard and navigating away.
+      saveCompletedRef.current = true
+      setDraftTaxonomyNodes([])
+      setDraftTaxonomyData({})
+      initialQuestionTaxonomyIdRef.current = selectedQuestionTaxonomyId
+      setCustomTaxonomyId(selectedQuestionTaxonomyId)
       setHasUnsavedChanges(false)
-      setSaveSuccessMessage(`Question "${saved.prompt.slice(0, 30)}..." successfully saved to database!`)
+      markClean()
+      setSaveSuccessMessage('Question saved.')
 
-      // Refresh database questions cache
-      await questionBankService.fetchQuestionsFromDatabase()
+      // Refresh the Question Bank cache, but do not let a cache-refresh issue
+      // turn a successful database save into a failed-save state.
+      try {
+        await questionBankService.fetchQuestionsFromDatabase()
+      } catch (refreshError) {
+        console.warn('Question saved, but refreshing the Question Bank cache failed:', refreshError)
+      }
 
-      setTimeout(() => {
-        navigate('/admin/questions')
-      }, 350)
+      window.setTimeout(() => {
+        markClean()
+        navigate('/admin/questions', { replace: true })
+      }, 2200)
     } catch (err: any) {
       console.error('Save question error:', err)
-      setFormError(err.message || 'Failed to save question to database. Please check your inputs and try again.')
+      saveCompletedRef.current = false
+      const message = err?.message || 'Could not save the question. Check your answers and try again.'
+      setFormError(message)
+      window.setTimeout(() => focusFieldForSaveError(message), 50)
     } finally {
+      saveQuestionInFlightRef.current = false
       setIsSaving(false)
     }
   }
@@ -872,81 +1744,86 @@ export const CreateQuestionPage: React.FC = () => {
     )
   }
 
-  const currentChapters = (domain && taxonomyData[domain]?.chapters) || []
+  // Readiness is advisory; the authoritative save validations below remain unchanged.
+  const hasValidAnswer = questionType === 'grid_in'
+    ? parseNumericAnswer(numericAnswer) !== null && parseNumericTolerance(numericTolerance) !== null && numericAlternateAnswers.split(/[,\n]/).every(answer => !answer.trim() || parseNumericAnswer(answer.trim()) !== null)
+    : choices.filter(choice => choice.text.trim()).length >= 2 &&
+      choices.some(choice => choice.isCorrect && choice.text.trim()) &&
+      (questionType !== 'multiple_choice' || choices.filter(choice => choice.isCorrect && choice.text.trim()).length === 1)
+  const editorSteps: QuestionEditorStep[] = [
+    { id: 'organization', title: 'Organization', description: 'Curriculum and collection', required: true, complete: Boolean(selectedQuestionTaxonomyId && domain.trim() && chapter.trim() && lesson.trim() && collection.trim()) },
+    { id: 'format', title: 'Question settings', description: 'Type, level, and timing', required: true, complete: Boolean(targetExam.trim() && Number(estimatedSeconds) >= 10) },
+    { id: 'prompt', title: 'Question', description: 'Problem and media', required: true, complete: Boolean(prompt.trim()) },
+    { id: 'answers', title: 'Answer key', description: 'Correct response', required: true, complete: Boolean(hasValidAnswer) },
+    { id: 'guidance', title: 'Explanation', description: 'Optional teaching notes', required: false, complete: Boolean(explanation.trim()) },
+  ]
+  const jumpToEditorSection = (id: QuestionEditorStepId) => {
+    if (previewMode === 'preview') setPreviewMode('split')
+    window.setTimeout(() => document.getElementById(`question-editor-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 30)
+  }
+
+  const currentChapters = (domain && editorTaxonomyData[domain]?.chapters) || []
   const currentLessons = (chapter && currentChapters.find((c: any) => c.name === chapter)?.lessons) || []
 
   return (
     <AdminLayout
-      title={isEditing ? 'Edit Question' : 'Question Bank: Create Question'}
-      subtitle="Categorize by Domain › Chapter › Lesson, attach diagram files, and verify live student preview"
+      title={isEditing ? 'Edit Question' : 'Create Question'}
+      subtitle="Write and preview questions for your assessments"
       actions={
-        <div className="flex items-center gap-2">
-          {/* View mode toggle */}
-          <div className="hidden sm:flex items-center gap-1 rounded-xl bg-slate-100 p-1 border border-slate-200 text-xs">
-            <button
-              type="button"
-              onClick={() => setPreviewMode('editor')}
-              className={`px-3 py-1.5 rounded-lg font-medium transition ${
-                previewMode === 'editor'
-                  ? 'bg-white text-blue-700 shadow-xs font-semibold'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Form Only
-            </button>
-            <button
-              type="button"
-              onClick={() => setPreviewMode('split')}
-              className={`px-3 py-1.5 rounded-lg font-medium transition ${
-                previewMode === 'split'
-                  ? 'bg-white text-blue-700 shadow-xs font-semibold'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Split View
-            </button>
-            <button
-              type="button"
-              onClick={() => setPreviewMode('preview')}
-              className={`px-3 py-1.5 rounded-lg font-medium transition ${
-                previewMode === 'preview'
-                  ? 'bg-white text-blue-700 shadow-xs font-semibold'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Eye className="h-3.5 w-3.5 inline mr-1" />
-              Live Preview
-            </button>
-          </div>
-
+        <div className="flex flex-wrap items-center gap-2">
           <Link
             to="/admin/questions"
-            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
           >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            <span>Back to Bank</span>
+            <ArrowLeft className="h-4 w-4" /> Question Bank
           </Link>
-
           <button
             type="button"
-            disabled={isSaving}
+            disabled={isSaving || !isEditorHydrated}
             onClick={() => handleSave()}
             style={{ backgroundColor: '#2563eb', color: '#ffffff' }}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 disabled:opacity-50 transition shadow-2xs cursor-pointer"
+            className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-bold shadow-sm transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Save className="h-3.5 w-3.5" />
-            <span>{isSaving ? 'Saving...' : isEditing ? 'Update Question' : 'Save Question to Bank'}</span>
+            {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            {isSaving ? 'Saving…' : isEditing ? 'Save changes' : 'Save question'}
           </button>
         </div>
       }
     >
-      {/* Toast Notification */}
-      {saveSuccessMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-4 py-2.5 rounded-2xl shadow-xl border border-slate-700 flex items-center gap-2 text-xs font-medium animate-in fade-in duration-200">
-          <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-          <span>{saveSuccessMessage}</span>
+      {isSaving && (
+        <div role="status" aria-live="polite" className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] w-[min(92vw,560px)] rounded-2xl border border-blue-200 bg-blue-50 px-5 py-4 shadow-2xl flex items-center gap-3">
+          <Loader2 className="h-6 w-6 animate-spin text-blue-700 shrink-0" />
+          <div><p className="text-sm font-bold text-blue-950">Saving question…</p></div>
         </div>
       )}
+      {/* Toast Notifications */}
+      {quickColSuccess && (
+        <div role="status" className="fixed bottom-20 right-6 z-50 bg-emerald-700 text-white px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-xs font-medium">
+          <CheckCircle2 className="h-4 w-4" />
+          <span>{quickColSuccess}</span>
+        </div>
+      )}
+      {saveSuccessMessage && (
+        <div role="status" aria-live="polite" className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] w-[min(92vw,680px)] rounded-2xl border border-emerald-300 bg-white px-5 py-4 shadow-2xl animate-in fade-in duration-200">
+          <div className="flex items-start gap-3">
+            <div className="rounded-full bg-emerald-100 p-2"><CheckCircle2 className="h-6 w-6 text-emerald-700" /></div>
+            <div className="min-w-0"><p className="text-base font-bold text-emerald-950">Question saved successfully</p><p className="mt-1 text-sm leading-relaxed text-slate-700">{saveSuccessMessage}</p></div>
+          </div>
+        </div>
+      )}
+      <div className="mb-5 space-y-4">
+        <QuestionEditorOverview
+          editing={isEditing}
+          questionType={questionType}
+          collection={collection}
+          isSaving={isSaving}
+          dirty={hasUnsavedChanges}
+          hydrated={isEditorHydrated}
+          steps={editorSteps}
+        />
+        <QuestionEditorNavigation steps={editorSteps} onJump={jumpToEditorSection} />
+        <QuestionEditorViewSwitch mode={previewMode} onChange={setPreviewMode} />
+      </div>
       <div
         className={`grid gap-6 ${
           previewMode === 'split'
@@ -960,23 +1837,88 @@ export const CreateQuestionPage: React.FC = () => {
         {previewMode !== 'preview' && (
           <form
             onSubmit={handleSave}
-            onChangeCapture={() => setHasUnsavedChanges(true)}
-            onClickCapture={() => setHasUnsavedChanges(true)}
-            className={`space-y-6 bg-white p-6 rounded-3xl border border-slate-200 shadow-xs min-w-0 ${
+            onChangeCapture={() => {
+              if (!saveCompletedRef.current) setHasUnsavedChanges(true)
+            }}
+            className={`question-editor-form space-y-8 bg-white p-6 rounded-3xl border border-slate-200 shadow-sm min-w-0 ${
               previewMode === 'split' ? 'lg:col-span-7' : 'w-full'
             }`}
           >
-            {/* Section 1: 3-Tier Categorization: Domain -> Chapter -> Lesson */}
-            <div className="space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+            {/* Section 1: Legacy compatibility categorization */}
+            <div id="question-editor-organization" className="space-y-4">
+              <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-2">
                   <Layers className="h-4 w-4 text-blue-600" />
-                  1. Question Categorization (Domain › Chapter › Lesson)
+                  1. Curriculum & Collection
                 </h3>
-                <span className="text-[11px] font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-100">
-                  Curriculum Mapping
+                <span className="text-[11px] font-semibold text-slate-500 bg-slate-50 px-2 py-0.5 rounded-md border border-slate-200">
+                  Required to save
                 </span>
               </div>
+
+              {draftTaxonomyNodes.length > 0 && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900" role="status">
+                  <span className="font-semibold">Pending taxonomy changes:</span>{' '}
+                  {draftTaxonomyNodes.map((node) =>
+                    node.type === 'domain'
+                      ? node.domain
+                      : node.type === 'chapter'
+                      ? `${node.domain} › ${node.chapter}`
+                      : `${node.domain} › ${node.chapter} › ${node.lesson}`
+                  ).join(' • ')}
+                  <span className="block mt-1 text-[10px] text-amber-700">These disappear if you discard the question.</span>
+                </div>
+              )}
+
+              <p className="text-xs leading-relaxed text-slate-500">
+                {isEditing ? 'Your saved curriculum selections are shown below. Change them only if this question belongs somewhere else.' : 'Choose the curriculum, then the domain, chapter, and lesson for this question.'}
+              </p>
+
+              {/* Question Taxonomy assignment */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-700">
+                    Taxonomy <span className="text-rose-500 font-bold ml-0.5">*</span>
+                  </label>
+                  <span className="text-[10px] text-slate-400">Curriculum</span>
+                </div>
+                <select
+                  value={selectedQuestionTaxonomyId}
+                  onChange={(e) => {
+                    void handleQuestionTaxonomyChange(e.target.value)
+                  }}
+                  disabled={isSaving || genericTaxonomies.length === 0}
+                  aria-label="Question Taxonomy"
+                  className="mt-1 w-full min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-800 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-400"
+                >
+                  <option value="">Select a taxonomy...</option>
+                  {selectedQuestionTaxonomyId && !genericTaxonomies.some((item) => String(item.id) === selectedQuestionTaxonomyId) && (
+                    <option value={selectedQuestionTaxonomyId}>Saved taxonomy</option>
+                  )}
+                  {genericTaxonomies.map((taxonomy) => (
+                    <option key={taxonomy.id} value={taxonomy.id}>
+                      {taxonomy.name}{taxonomy.code ? ` (${taxonomy.code})` : ''}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Choose the curriculum for this question. The available domains, chapters, and lessons depend on this selection.
+                </p>
+              </div>
+
+              {/* Only show custom-taxonomy context after the user actually enters
+                  a custom Domain / Chapter / Lesson flow or has staged a custom item. */}
+              {(isCustomDomain || isCustomChapter || isCustomLesson || draftTaxonomyNodes.length > 0) && (
+                <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3" aria-live="polite">
+                  <div className="text-xs font-semibold text-indigo-950">Taxonomy for new Domain / Chapter / Lesson</div>
+                  <div className="mt-1 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm font-medium text-slate-800">
+                    {genericTaxonomies.find((taxonomy) => taxonomy.id === selectedQuestionTaxonomyId)?.name || 'Select a taxonomy above'}
+                  </div>
+                  <p className="mt-1 text-[10px] text-indigo-700">
+                    New topics will be added when you save the question. Leave without saving to discard them.
+                  </p>
+                </div>
+              )}
 
               {/* Target Collection assignment */}
               <div>
@@ -989,7 +1931,6 @@ export const CreateQuestionPage: React.FC = () => {
                     onClick={() => {
                       setQuickColName('')
                       setQuickColDesc('')
-                      setQuickColTargetExam(targetExam || 'EST 1 / SAT Math')
                       setQuickColError(null)
                       setIsQuickCollectionModalOpen(true)
                     }}
@@ -999,24 +1940,31 @@ export const CreateQuestionPage: React.FC = () => {
                     <span>New Collection</span>
                   </button>
                 </div>
-                <div className="mt-1 flex gap-2">
-                  <input
-                    type="text"
-                    list="existing-collections"
+                <div className="mt-1">
+                  <select
                     value={collection}
                     onChange={(e) => setCollection(e.target.value)}
-                    placeholder="e.g. EST 1 Math Diagnostic 2025, Algebra Sprint..."
-                    className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-xs focus:border-blue-500 focus:outline-hidden"
-                  />
-                  <datalist id="existing-collections">
-                    {existingCollections.map((c) => (
-                      <option key={c} value={c} />
+                    aria-label="Question Collection / Test Pool"
+                    className="w-full min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-800 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  >
+                    <option value="" disabled>
+                      Select a question collection...
+                    </option>
+                    {Array.from(
+                      new Set([
+                        ...existingCollections,
+                        'General Question Bank',
+                        ...(collection.trim() ? [collection.trim()] : []),
+                      ])
+                    ).map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
                     ))}
-                    <option value="General Question Bank" />
-                  </datalist>
+                  </select>
                 </div>
                 <p className="text-[10px] text-slate-400 mt-1">
-                  Select an existing collection, type a new name, or use &quot;New Collection&quot; above.
+                  Choose the question bank collection where teachers will find this question.
                 </p>
               </div>
 
@@ -1025,7 +1973,7 @@ export const CreateQuestionPage: React.FC = () => {
                 <div>
                   <div className="flex items-center justify-between">
                     <label className="block text-xs font-semibold text-slate-700">
-                      Domain (Unit) <span className="text-rose-500 font-bold ml-0.5">* Required</span>
+                      Domain (Unit)
                     </label>
                     <button
                       type="button"
@@ -1036,7 +1984,7 @@ export const CreateQuestionPage: React.FC = () => {
                           setIsCustomChapter(true)
                           setIsCustomLesson(true)
                         } else {
-                          const domainKeys = Object.keys(taxonomyData)
+                          const domainKeys = Object.keys(editorTaxonomyData)
                           if (domainKeys.length > 0 && !domainKeys.includes(domain)) {
                             setDomain(domainKeys[0])
                           }
@@ -1052,7 +2000,6 @@ export const CreateQuestionPage: React.FC = () => {
                       <div className="mt-1 flex items-center gap-2">
                         <input
                           type="text"
-                          required
                           value={domain}
                           onChange={(e) => setDomain(e.target.value)}
                           onKeyDown={(e) => {
@@ -1068,7 +2015,7 @@ export const CreateQuestionPage: React.FC = () => {
                           type="button"
                           disabled={!domain.trim() || isCreatingDomain}
                           onClick={handleCreateCustomDomain}
-                          title="Save this domain to taxonomy database"
+                          title="Save this domain"
                           className="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition disabled:opacity-50 whitespace-nowrap flex items-center gap-1 shadow-xs cursor-pointer"
                         >
                           {isCreatingDomain ? (
@@ -1080,25 +2027,25 @@ export const CreateQuestionPage: React.FC = () => {
                         </button>
                       </div>
                       <p className="text-[10px] text-slate-400 mt-1">
-                        Click &quot;Save Domain&quot; or save question to persist in taxonomy database.
+                        Click &quot;Save Domain&quot; to stage this item. It is committed only when you save the question.
                       </p>
                     </div>
                   ) : (
                     <select
                       value={domain}
-                      required
-                      disabled={Object.keys(taxonomyData).length === 0}
+                      disabled={Object.keys(editorTaxonomyData).length === 0 && !domain}
                       onChange={(e) => {
                         const newDomain = e.target.value
                         setDomain(newDomain)
                         setIsCustomChapter(false)
                         setIsCustomLesson(false)
-                        const dInfo = newDomain ? taxonomyData[newDomain] : null
+                        const dInfo = newDomain ? editorTaxonomyData[newDomain] : null
                         if (dInfo && dInfo.chapters && dInfo.chapters.length > 0) {
                           const firstChap = dInfo.chapters[0].name
                           setChapter(firstChap)
                           if (dInfo.chapters[0].lessons && dInfo.chapters[0].lessons.length > 0) {
-                            setLesson(dInfo.chapters[0].lessons[0])
+                            const firstLesson = dInfo.chapters[0].lessons[0]
+                            setLesson(typeof firstLesson === 'string' ? firstLesson : firstLesson.name)
                           } else {
                             setLesson('')
                           }
@@ -1106,20 +2053,32 @@ export const CreateQuestionPage: React.FC = () => {
                           setChapter('')
                           setLesson('')
                         }
+
+                        const nextChapter = dInfo?.chapters?.[0]?.name || ''
+                        const firstLesson = dInfo?.chapters?.[0]?.lessons?.[0]
+                        const nextLesson = firstLesson
+                          ? (typeof firstLesson === 'string' ? firstLesson : firstLesson.name)
+                          : ''
+                        syncGenericAssignmentFromPath(newDomain, nextChapter, nextLesson)
+                        setHasUnsavedChanges(true)
                       }}
                       className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs focus:border-blue-500 focus:outline-hidden bg-white disabled:bg-slate-50 disabled:text-slate-400"
                     >
-                      {Object.keys(taxonomyData).length === 0 ? (
-                        <option value="">— No domains in database —</option>
+                      {Object.keys(editorTaxonomyData).length === 0 ? (
+                        <>
+                          <option value="">— No domains available —</option>
+                          {isEditing && domain && <option value={domain}>{domain}</option>}
+                        </>
                       ) : (
                         <>
                           <option value="">— Select Domain —</option>
-                          {Object.keys(taxonomyData).map((d) => {
-                            const dInfo = taxonomyData[d]
+                          {isEditing && domain && !editorTaxonomyData[domain] && <option value={domain}>{domain}</option>}
+                          {Object.keys(editorTaxonomyData).map((d) => {
+                            const dInfo = editorTaxonomyData[d]
                             const codeBadge = dInfo?.code ? `[${dInfo.code}] ` : ''
                             return (
                               <option key={d} value={d}>
-                                {codeBadge}{dInfo?.unitLabel ? `${dInfo.unitLabel} — ${d}` : d}
+                                {codeBadge}{d}
                               </option>
                             )
                           })}
@@ -1133,9 +2092,9 @@ export const CreateQuestionPage: React.FC = () => {
                       <span>{customTaxonomyFeedback.message}</span>
                     </p>
                   )}
-                  {Object.keys(taxonomyData).length === 0 && !isCustomDomain && (
+                  {Object.keys(editorTaxonomyData).length === 0 && !isCustomDomain && (
                     <p className="text-[11px] text-amber-700 mt-1.5 flex items-center gap-1">
-                      <span>No domains in database.</span>
+                      <span>No domains available.</span>
                       <Link to="/admin/taxonomy" className="font-semibold underline text-blue-600 hover:text-blue-800">
                         Create domains in Taxonomy
                       </Link>
@@ -1148,7 +2107,7 @@ export const CreateQuestionPage: React.FC = () => {
                 <div>
                   <div className="flex items-center justify-between">
                     <label className="block text-xs font-semibold text-slate-700">
-                      Chapter <span className="text-rose-500 font-bold ml-0.5">* Required</span>
+                      Chapter
                     </label>
                     <button
                       type="button"
@@ -1163,7 +2122,6 @@ export const CreateQuestionPage: React.FC = () => {
                       <div className="mt-1 flex items-center gap-2">
                         <input
                           type="text"
-                          required
                           value={chapter}
                           onChange={(e) => setChapter(e.target.value)}
                           onKeyDown={(e) => {
@@ -1179,7 +2137,7 @@ export const CreateQuestionPage: React.FC = () => {
                           type="button"
                           disabled={!chapter.trim() || !domain.trim() || isCreatingChapter}
                           onClick={handleCreateCustomChapter}
-                          title="Save this chapter to taxonomy database"
+                          title="Save this chapter"
                           className="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition disabled:opacity-50 whitespace-nowrap flex items-center gap-1 shadow-xs cursor-pointer"
                         >
                           {isCreatingChapter ? (
@@ -1191,35 +2149,46 @@ export const CreateQuestionPage: React.FC = () => {
                         </button>
                       </div>
                       <p className="text-[10px] text-slate-400 mt-1">
-                        Click &quot;Save Chapter&quot; or save question to persist in taxonomy database.
+                        Click &quot;Save Chapter&quot; to stage this item. It is committed only when you save the question.
                       </p>
                     </div>
                   ) : (
                     <select
                       value={chapter}
-                      required
-                      disabled={!domain || currentChapters.length === 0}
+                      disabled={!domain || (currentChapters.length === 0 && !chapter)}
                       onChange={(e) => {
                         const newChapter = e.target.value
                         setChapter(newChapter)
                         setIsCustomLesson(false)
-                        const dInfo = domain ? taxonomyData[domain] : null
+                        const dInfo = domain ? editorTaxonomyData[domain] : null
                         const matched = dInfo?.chapters?.find((c: any) => c.name === newChapter)
                         if (matched && matched.lessons && matched.lessons.length > 0) {
-                          setLesson(matched.lessons[0])
+                          const firstLesson = matched.lessons[0]
+                          setLesson(typeof firstLesson === 'string' ? firstLesson : firstLesson.name)
                         } else {
                           setLesson('')
                         }
+
+                        const firstLesson = matched?.lessons?.[0]
+                        const nextLesson = firstLesson
+                          ? (typeof firstLesson === 'string' ? firstLesson : firstLesson.name)
+                          : ''
+                        syncGenericAssignmentFromPath(domain, newChapter, nextLesson)
+                        setHasUnsavedChanges(true)
                       }}
                       className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs focus:border-blue-500 focus:outline-hidden bg-white disabled:bg-slate-50 disabled:text-slate-400"
                     >
                       {!domain ? (
                         <option value="">— Select Domain first —</option>
-                      ) : currentChapters.length === 0 ? (
-                        <option value="">— No chapters in this domain —</option>
+                      ) : currentChapters.length === 0 && !chapter ? (
+                        <>
+                          <option value="">— No chapters in this domain —</option>
+                          {isEditing && chapter && <option value={chapter}>{chapter}</option>}
+                        </>
                       ) : (
                         <>
                           <option value="">— Select Chapter —</option>
+                          {isEditing && chapter && !currentChapters.some((item: any) => item.name === chapter) && <option value={chapter}>{chapter}</option>}
                           {currentChapters.map((c: any) => {
                             const cCodeBadge = c.code ? `[${c.code}] ` : ''
                             return (
@@ -1269,7 +2238,6 @@ export const CreateQuestionPage: React.FC = () => {
                     <div className="mt-1 flex items-center gap-2">
                       <input
                         type="text"
-                        required
                         value={lesson}
                         onChange={(e) => setLesson(e.target.value)}
                         onKeyDown={(e) => {
@@ -1285,7 +2253,7 @@ export const CreateQuestionPage: React.FC = () => {
                         type="button"
                         disabled={!lesson.trim() || !chapter.trim() || !domain.trim() || isCreatingLesson}
                         onClick={handleCreateCustomLesson}
-                        title="Save this lesson to taxonomy database"
+                        title="Save this lesson"
                         className="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition disabled:opacity-50 whitespace-nowrap flex items-center gap-1 shadow-xs cursor-pointer"
                       >
                         {isCreatingLesson ? (
@@ -1297,29 +2265,44 @@ export const CreateQuestionPage: React.FC = () => {
                       </button>
                     </div>
                     <p className="text-[10px] text-slate-400 mt-1">
-                      Click &quot;Save Lesson&quot; or save question to persist in taxonomy database.
+                      Click &quot;Save Lesson&quot; to stage this item. It is committed only when you save the question.
                     </p>
                   </div>
                 ) : (
                   <select
                     value={lesson}
-                    required
-                    disabled={!chapter || currentLessons.length === 0}
-                    onChange={(e) => setLesson(e.target.value)}
+                    disabled={!chapter || (currentLessons.length === 0 && !lesson)}
+                    onChange={(e) => {
+                      const nextLesson = e.target.value
+                      setLesson(nextLesson)
+                      syncGenericAssignmentFromPath(domain, chapter, nextLesson)
+                      setHasUnsavedChanges(true)
+                    }}
                     className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs focus:border-blue-500 focus:outline-hidden bg-white disabled:bg-slate-50 disabled:text-slate-400"
                   >
                     {!chapter ? (
-                      <option value="">— Select Chapter first —</option>
-                    ) : currentLessons.length === 0 ? (
-                      <option value="">— No lessons in this chapter —</option>
+                      <>
+                        <option value="">— Select Chapter first —</option>
+                        {isEditing && lesson && <option value={lesson}>{lesson}</option>}
+                      </>
+                    ) : currentLessons.length === 0 && !lesson ? (
+                      <>
+                        <option value="">— No lessons in this chapter —</option>
+                        {isEditing && lesson && <option value={lesson}>{lesson}</option>}
+                      </>
                     ) : (
                       <>
                         <option value="">— Select Lesson —</option>
-                        {currentLessons.map((l: string) => (
-                          <option key={l} value={l}>
-                            {l}
-                          </option>
-                        ))}
+                        {isEditing && lesson && !currentLessons.some((item: any) => (typeof item === 'string' ? item : item.name) === lesson) && <option value={lesson}>{lesson}</option>}
+                        {currentLessons.map((l: any) => {
+                          const lessonName = typeof l === 'string' ? l : l.name
+                          const lessonCode = typeof l === 'string' ? '' : l.code
+                          return (
+                            <option key={lessonName} value={lessonName}>
+                              {lessonCode ? `[${lessonCode}] ` : ''}{lessonName}
+                            </option>
+                          )
+                        })}
                       </>
                     )}
                   </select>
@@ -1343,13 +2326,14 @@ export const CreateQuestionPage: React.FC = () => {
             </div>
 
             {/* Section 2: Format & Difficulty Parameters */}
-            <div className="space-y-4 pt-2">
+            <div id="question-editor-format" className="space-y-4 pt-2">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-2">
                   <Sliders className="h-4 w-4 text-indigo-600" />
-                  2. Format & Exam Parameters
+                  2. Question Settings
                 </h3>
               </div>
+              <p className="text-xs text-slate-500">Set how students will answer this question and how much time they should have.</p>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
@@ -1376,9 +2360,9 @@ export const CreateQuestionPage: React.FC = () => {
                     onChange={(e) => setDifficulty(e.target.value as any)}
                     className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs focus:border-blue-500 focus:outline-hidden bg-white"
                   >
-                    <option value="easy">Easy (Foundational)</option>
-                    <option value="medium">Medium (Standard)</option>
-                    <option value="hard">Hard (Advanced / Stretch)</option>
+                    <option value="easy">Easy</option>
+                    <option value="medium">Medium</option>
+                    <option value="hard">Hard</option>
                   </select>
                 </div>
 
@@ -1444,21 +2428,23 @@ export const CreateQuestionPage: React.FC = () => {
                     <Clock className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2.5" />
                   </div>
                   <p className="text-[10px] text-slate-400 mt-1">
-                    Mandatory: Recommended solving pacing (e.g. 90 sec for EST/SAT Math)
+                    Estimated time a student needs to answer this question (minimum 10 seconds).
                   </p>
                 </div>
               </div>
             </div>
 
             {/* Section 3: Problem Stem & Math Notation */}
-            <div className="space-y-4 pt-2">
+            <div id="question-editor-prompt" className="space-y-4 pt-2">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-2">
                   <FileCode className="h-4 w-4 text-emerald-600" />
-                  3. Problem Stem & Mathematical Notation
+                  3. Question & Math
                 </h3>
-                <span className="text-[11px] text-slate-400">Enclose equations in $...$</span>
+                <span className="text-[11px] text-slate-400">Math symbols supported</span>
               </div>
+
+              <p className="text-xs text-slate-500">Write the question as students should see it. Use the math toolbar for equations and symbols.</p>
 
               {/* Math Quick Inserter Toolbar */}
               <MathSymbolInserter
@@ -1590,11 +2576,14 @@ export const CreateQuestionPage: React.FC = () => {
             </div>
 
             {/* Section 4: Answer Choices or Free-Response Key */}
-            <div className="space-y-4 pt-2">
+            <div id="question-editor-answers" className="space-y-4 pt-2">
+              <p className="text-xs leading-relaxed text-slate-500">
+                {questionType === 'grid_in' ? 'Enter the correct numeric answer. Add a tolerance only if approximate answers should be accepted.' : questionType === 'multi_select' ? 'Add at least two answer options, then mark every correct option.' : 'Add at least two answer options, then mark the single correct answer.'}
+              </p>
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-2">
                   <CheckCircle2 className="h-4 w-4 text-blue-600" />
-                  4. Answer Key & Choices
+                  4. Answer Key
                 </h3>
                 {questionType !== 'grid_in' && (
                   <button
@@ -1636,6 +2625,17 @@ export const CreateQuestionPage: React.FC = () => {
                         className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs focus:border-blue-500 focus:outline-hidden"
                       />
                     </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700">Other accepted answers (optional)</label>
+                    <textarea
+                      value={numericAlternateAnswers}
+                      onChange={(e) => setNumericAlternateAnswers(e.target.value)}
+                      rows={3}
+                      placeholder={'One answer per line, e.g. 3\n-3'}
+                      className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs focus:border-blue-500 focus:outline-hidden"
+                    />
+                    <p className="mt-1 text-xs text-slate-500">Use this only when more than one distinct numeric answer is correct. Equivalent values such as 0.5 and 1/2 already represent the same answer.</p>
                   </div>
                   <p className="text-[11px] text-slate-500 leading-relaxed">
                     Students will enter their numeric value directly into an onscreen keypad. Fractions and decimals are normalized automatically.
@@ -1679,7 +2679,6 @@ export const CreateQuestionPage: React.FC = () => {
                                 setActiveTargetName(`choice-${c.id}`)
                               }}
                               type="text"
-                              required
                               value={c.text}
                               onChange={(e) => handleUpdateChoiceText(c.id, e.target.value)}
                               placeholder={`Option ${letter} (e.g. k = 2 or $x = \\frac{1}{2}$)`}
@@ -1715,11 +2714,11 @@ export const CreateQuestionPage: React.FC = () => {
             </div>
 
             {/* Section 5: Solution Derivation & Misconceptions */}
-            <div className="space-y-4 pt-2">
+            <div id="question-editor-guidance" className="space-y-4 pt-2">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-2">
                   <Lightbulb className="h-4 w-4 text-amber-500" />
-                  5. Diagnostic Derivation & Student Explanations
+                  5. Explanation & Teaching Notes
                 </h3>
               </div>
 
@@ -1778,9 +2777,8 @@ export const CreateQuestionPage: React.FC = () => {
 
             {/* Form Validation Error Banner */}
             {formError && (
-              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
-                <span>{formError}</span>
+              <div id="question-save-feedback" role="alert" aria-live="assertive" className="rounded-2xl border border-rose-300 bg-rose-50 p-4 text-sm text-rose-900 shadow-sm">
+                <div className="flex items-start gap-3"><AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-rose-700" /><div><p className="font-bold">Please review this question</p><p className="mt-1 leading-relaxed">{formError}</p><p className="mt-2 text-xs text-rose-800">Your work is still here. Make the correction and save again.</p></div></div>
               </div>
             )}
 
@@ -1804,11 +2802,12 @@ export const CreateQuestionPage: React.FC = () => {
                 )}
                 <button
                   type="submit"
+                  disabled={isSaving}
                   style={{ backgroundColor: '#2563eb', color: '#ffffff' }}
-                  className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition shadow-xs"
+                  className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 transition shadow-xs"
                 >
-                  <Save className="h-3.5 w-3.5" />
-                  <span>{isEditing ? 'Update Question' : 'Save Question to Bank'}</span>
+                  {isSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                  <span>{isSaving ? 'Saving…' : isEditing ? 'Update Question' : 'Save Question to Bank'}</span>
                 </button>
               </div>
             </div>
@@ -1824,16 +2823,30 @@ export const CreateQuestionPage: React.FC = () => {
               <div className="flex items-center gap-2">
                 <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
-                  Live Interactive Student View
+                  Student preview · local only
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowExplanationInPreview(!showExplanationInPreview)}
-                className="text-[11px] font-semibold text-blue-600 hover:text-blue-700"
-              >
-                {showExplanationInPreview ? 'Hide Answer Key' : 'Reveal Answer Key'}
-              </button>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPreviewSelectedChoice(null)
+                    setPreviewMultiSelected([])
+                    setPreviewInputAnswer('')
+                  }}
+                  className="text-xs font-semibold text-slate-600 hover:text-slate-900"
+                >
+                  Reset answer
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={showExplanationInPreview}
+                  onClick={() => setShowExplanationInPreview(!showExplanationInPreview)}
+                  className="text-xs font-semibold text-blue-700 hover:text-blue-900"
+                >
+                  {showExplanationInPreview ? 'Hide answer key' : 'Reveal answer key'}
+                </button>
+              </div>
             </div>
 
             {/* Live Rendered Card */}
@@ -1875,7 +2888,7 @@ export const CreateQuestionPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Categorization Breadcrumb (Domain › Chapter › Lesson) */}
+              {/* Legacy compatibility categorization breadcrumb */}
               <div className="text-[11px] text-slate-500 bg-slate-50 px-3 py-2 rounded-xl border border-slate-100 flex flex-wrap items-center gap-1.5">
                 <span className="font-semibold text-slate-700">{domain}</span>
                 <span className="text-slate-300">›</span>
@@ -2070,7 +3083,8 @@ export const CreateQuestionPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsQuickCollectionModalOpen(false)}
-                className="p-1 rounded-lg hover:bg-slate-100 text-slate-400"
+                disabled={isSavingQuickCollection}
+                className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 disabled:opacity-40"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -2101,23 +3115,6 @@ export const CreateQuestionPage: React.FC = () => {
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700">
-                  Target Track / Level
-                </label>
-                <select
-                  value={quickColTargetExam}
-                  onChange={(e) => setQuickColTargetExam(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-indigo-500 focus:outline-hidden bg-white"
-                >
-                  <option value="EST 1 / SAT Math">EST 1 / SAT Math</option>
-                  <option value="EST 2 / SAT Subject">EST 2 / SAT Subject Math</option>
-                  <option value="ACT Math">ACT Math</option>
-                  <option value="AP Calculus AB/BC">AP Calculus AB/BC</option>
-                  <option value="General Diagnostic">General Diagnostic</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700">
                   Description (Optional)
                 </label>
                 <textarea
@@ -2133,16 +3130,19 @@ export const CreateQuestionPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsQuickCollectionModalOpen(false)}
-                  className="px-3.5 py-1.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  disabled={isSavingQuickCollection}
+                  className="px-3.5 py-1.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
+                  disabled={isSavingQuickCollection || !quickColName.trim()}
                   style={{ backgroundColor: '#4f46e5', color: '#ffffff' }}
-                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 shadow-xs"
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 shadow-xs"
                 >
-                  Create & Select
+                  {isSavingQuickCollection && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {isSavingQuickCollection ? 'Creating & selecting…' : 'Create & Select'}
                 </button>
               </div>
             </form>
@@ -2195,17 +3195,29 @@ export const CreateQuestionPage: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  if (questionId) {
-                    questionBankService.deleteQuestion(questionId)
-                    navigate('/admin/questions')
+                disabled={isDeleting}
+                onClick={async () => {
+                  if (!questionId || isDeleting) return
+                  setIsDeleting(true)
+                  setFormError(null)
+                  setSaveSuccessMessage(null)
+                  try {
+                    await questionBankService.deleteQuestion(questionId)
+                    setSaveSuccessMessage('Question deleted successfully.')
+                    setShowDeleteModal(false)
+                    setTimeout(() => navigate('/admin/questions'), 350)
+                  } catch (err: any) {
+                    console.error('Delete question error:', err)
+                    setFormError(err?.message || 'Failed to delete question. Please try again.')
+                  } finally {
+                    setIsDeleting(false)
                   }
                 }}
                 style={{ backgroundColor: '#e11d48', color: '#ffffff' }}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 text-white text-xs font-semibold hover:bg-rose-700 transition shadow-xs"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 text-white text-xs font-semibold hover:bg-rose-700 transition shadow-xs disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <Trash2 className="h-4 w-4" />
-                <span>Delete Question</span>
+                {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                <span>{isDeleting ? 'Deleting...' : 'Delete Question'}</span>
               </button>
             </div>
           </div>

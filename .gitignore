@@ -1,8 +1,67 @@
-node_modules/
-build/
-dist/
-coverage/
-.DS_Store
-*.log
-.env*
+# Environment variables and secrets
+.env
+.env.*
 !.env.example
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+coverage/
+
+# Backups and local databases
+*.bak
+*.backup
+*.sql.gza
+*.dump
+*.sqlite
+*.sqlite3
+*.db
+
+# Generated project backups
+*.step*.bak
+step92_reports/
+
+# Temporary files
+*.tmp
+*.log
+*.zip
+
+# Local settings
+.vscode/
+.idea/
+
+# Local development installers
+apply_step*.py
+apply_mathsystem_step*.py
+MathSystem_Step*_Installer.py
+
+# Local QA reports and notes
+step92_reports/
+reports/
+optional-fixes/
+CHANGED_FILES.txt
+DELETE_THESE_FILES.txt
+Edits Needed for Math System.txt
+
+# Historical development notes
+README_STEP*.md
+STEP*_README.md
+STEP*_REMOVED_FILES.txt
+
+# Local test launchers
+run-*.cmd
+
+# Generated backups
+*.bak
+*.backup
+*.zip
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+node_modules/
+dist/

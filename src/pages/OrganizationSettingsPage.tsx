@@ -1,33 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import AdminLayout from '../components/AdminLayout'
 import DynamicRegistrationField from '../components/DynamicRegistrationField'
 import { useUnsavedChanges } from '../contexts/UnsavedChangesContext'
 import { supabase } from '../lib/supabaseClient'
-import {
-  ArrowUp,
-  ArrowDown,
-  Trash2,
-  Edit2,
-  Eye,
-  EyeOff,
-  Plus,
-  Check,
-  AlertCircle,
-  X,
-  Smartphone,
-} from 'lucide-react'
+import { defaultAssessmentSettings } from '../lib/assessmentService'
+import { getStaffOrganizationContext } from '../lib/organizationConfigService'
+import { SettingsNotice, SettingsPanel, SettingsWorkspaceHeader, type SettingsTab } from '../components/settings/SettingsWorkspaceUI'
+import { ArrowDown, ArrowUp, Check, Eye, EyeOff, Plus, Search, Trash2, Pencil, RotateCcw, LockKeyhole, Smartphone, Save } from 'lucide-react'
 
-export type FieldType =
-  | 'text'
-  | 'email'
-  | 'phone'
-  | 'number'
-  | 'dropdown'
-  | 'radio'
-  | 'checkbox'
-  | 'date'
-  | 'textarea'
-
+export type FieldType = 'text' | 'email' | 'phone' | 'number' | 'dropdown' | 'radio' | 'checkbox' | 'date' | 'textarea'
 export interface RegistrationField {
   id: string
   organization_id?: string
@@ -41,800 +22,359 @@ export interface RegistrationField {
 }
 
 const FIELD_TYPE_LABELS: Record<FieldType, string> = {
-  text: 'Short Text',
-  email: 'Email Address',
-  phone: 'Phone Number',
-  number: 'Number',
-  dropdown: 'Dropdown Select',
-  radio: 'Single Choice (Radio)',
-  checkbox: 'Multiple Choice (Checkboxes)',
-  date: 'Date Picker',
-  textarea: 'Long Paragraph / Notes',
+  text: 'Short text', email: 'Email address', phone: 'Phone number', number: 'Number',
+  dropdown: 'Dropdown', radio: 'Single choice', checkbox: 'Multiple choice',
+  date: 'Date', textarea: 'Long answer',
 }
 
-const DEFAULT_REGISTRATION_FIELDS: RegistrationField[] = [
-  {
-    id: 'fld-1',
-    label: 'Student Full Name',
-    field_key: 'full_name',
-    field_type: 'text',
-    is_required: true,
-    options: null,
-    display_order: 0,
-    is_active: true,
-  },
-  {
-    id: 'fld-2',
-    label: 'Student Email Address',
-    field_key: 'email',
-    field_type: 'email',
-    is_required: true,
-    options: null,
-    display_order: 1,
-    is_active: true,
-  },
-  {
-    id: 'fld-3',
-    label: 'WhatsApp Contact Number',
-    field_key: 'whatsapp_number',
-    field_type: 'phone',
-    is_required: false,
-    options: null,
-    display_order: 2,
-    is_active: true,
-  },
-  {
-    id: 'fld-4',
-    label: 'Current Grade / Level',
-    field_key: 'grade_level',
-    field_type: 'dropdown',
-    is_required: true,
-    options: ['Grade 9', 'Grade 10', 'Grade 11', 'Grade 12', 'Graduated / Gap Year'],
-    display_order: 3,
-    is_active: true,
-  },
-  {
-    id: 'fld-5',
-    label: 'Target Exam Track',
-    field_key: 'target_exam',
-    field_type: 'radio',
-    is_required: false,
-    options: ['EST 1 Math', 'Digital SAT Math', 'ACT Math', 'Pre-Calculus / AP Calculus'],
-    display_order: 4,
-    is_active: true,
-  },
-]
+type Branding = { tagline: string; phone: string; whatsapp: string; websiteUrl: string }
+const EMPTY_BRANDING: Branding = { tagline: '', phone: '', whatsapp: '', websiteUrl: '' }
+const inputClass = 'w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100'
+const secondaryButton = 'inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40'
+const primaryButton = 'inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50'
+
+function slugify(text: string) {
+  return text.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+}
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : typeof error === 'string' ? error : 'Something went wrong. Please try again.'
+}
+function isHttpUrl(value: string) {
+  if (!value.trim()) return true
+  try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'http:' } catch { return false }
+}
 
 export default function OrganizationSettingsPage() {
+  const [tab, setTab] = useState<SettingsTab>('fields')
   const [fields, setFields] = useState<RegistrationField[]>([])
   const [orgId, setOrgId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-
-  // Branding & Marketing state
-  const [tagline, setTagline] = useState('')
-  const [phone, setPhone] = useState('')
-  const [whatsapp, setWhatsapp] = useState('')
-  const [websiteUrl, setWebsiteUrl] = useState('')
-  const [savingSettings, setSavingSettings] = useState(false)
-  const [settingsSavedMessage, setSettingsSavedMessage] = useState(false)
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
-
-  // Add / Edit Field Modal State
-  const [modalMode, setModalMode] = useState<'create' | 'edit' | null>(null)
+  const [pageError, setPageError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [visibility, setVisibility] = useState<'all' | 'active' | 'hidden'>('all')
+  const [branding, setBranding] = useState<Branding>(EMPTY_BRANDING)
+  const [savedBranding, setSavedBranding] = useState<Branding>(EMPTY_BRANDING)
+  const [savingBranding, setSavingBranding] = useState(false)
+  const [brandingError, setBrandingError] = useState<string | null>(null)
+  const [fieldModal, setFieldModal] = useState<'create' | 'edit' | null>(null)
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null)
   const [fieldLabel, setFieldLabel] = useState('')
   const [fieldKey, setFieldKey] = useState('')
   const [fieldType, setFieldType] = useState<FieldType>('text')
-  const [isRequired, setIsRequired] = useState(true)
-  const [optionsText, setOptionsText] = useState('')
+  const [fieldRequired, setFieldRequired] = useState(true)
+  const [fieldOptions, setFieldOptions] = useState('')
+  const [fieldDirty, setFieldDirty] = useState(false)
   const [savingField, setSavingField] = useState(false)
   const [fieldError, setFieldError] = useState<string | null>(null)
-
-  // In-app Delete Confirmation Modal State (replaces blocked window.confirm)
-  const [fieldToDelete, setFieldToDelete] = useState<RegistrationField | null>(null)
-
-  // Interactive Live Preview State
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<RegistrationField | null>(null)
   const [previewValues, setPreviewValues] = useState<Record<string, string>>({})
 
-  useEffect(() => {
-    fetchData()
-  }, [])
+  const brandingDirty = useMemo(() => JSON.stringify(branding) !== JSON.stringify(savedBranding), [branding, savedBranding])
+  const activeFields = useMemo(() => fields.filter(field => field.is_active), [fields])
+  const filteredFields = useMemo(() => fields.filter(field => {
+    const matchVisibility = visibility === 'all' || (visibility === 'active' ? field.is_active : !field.is_active)
+    const term = search.trim().toLowerCase()
+    return matchVisibility && (!term || `${field.label} ${FIELD_TYPE_LABELS[field.field_type]}`.toLowerCase().includes(term))
+  }), [fields, search, visibility])
+  const canReorder = search.trim() === '' && visibility === 'all'
 
-  async function fetchData() {
+  useEffect(() => { void loadSettings() }, [])
+
+  async function loadSettings() {
     setLoading(true)
-
+    setPageError(null)
     try {
-      const { data: orgData, error: orgError } = await supabase.from('organizations').select('id').limit(1).single()
-      if (orgError) throw orgError
-      if (orgData) setOrgId(orgData.id)
-
+      const { organizationId } = await getStaffOrganizationContext()
+      setOrgId(organizationId)
       const [fieldResult, settingsResult] = await Promise.all([
-        supabase.from('registration_fields').select('*').order('display_order'),
-        supabase.from('organization_settings').select('*').limit(1).maybeSingle(),
+        supabase.from('registration_fields').select('*').eq('organization_id', organizationId).order('display_order'),
+        supabase.from('organization_settings').select('*').eq('organization_id', organizationId).maybeSingle(),
       ])
       if (fieldResult.error) throw fieldResult.error
       if (settingsResult.error) throw settingsResult.error
-
       setFields((fieldResult.data ?? []) as RegistrationField[])
-
-      const orgSettings = settingsResult.data
-      if (orgSettings) {
-        setTagline(orgSettings.marketing_tagline ?? '')
-        setPhone(orgSettings.contact_phone ?? '')
-        setWhatsapp(orgSettings.whatsapp_url ?? '')
-        setWebsiteUrl(orgSettings.website_url ?? '')
+      const settings = settingsResult.data
+      const loaded = {
+        tagline: settings?.marketing_tagline ?? '',
+        phone: settings?.contact_phone ?? '',
+        whatsapp: settings?.whatsapp_url ?? '',
+        websiteUrl: settings?.website_url ?? '',
       }
+      setBranding(loaded)
+      setSavedBranding(loaded)
     } catch (error) {
-      console.error('Failed to load organization settings from Supabase:', error)
-    }
-
-    setLoading(false)
-  }
-
-  function slugify(text: string): string {
-    return text
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_+|_+$/g, '')
-  }
-
-  function handleLabelChange(value: string) {
-    setFieldLabel(value)
-    if (modalMode === 'create') {
-      setFieldKey(slugify(value))
+      setPageError(`Could not load organization settings: ${errorMessage(error)}`)
+    } finally {
+      setLoading(false)
     }
   }
 
-  function openCreateModal() {
-    setModalMode('create')
+  async function initializeRegistrationFields() {
+    if (!orgId || fields.length) return
+    setBusyId('initializing')
+    setPageError(null)
+    try {
+      const initial = defaultAssessmentSettings.studentFields.map((field, index) => ({
+        organization_id: orgId,
+        label: field.label,
+        field_key: field.id,
+        field_type: field.type === 'select' ? 'dropdown' : field.type,
+        is_required: field.required,
+        is_active: field.enabled,
+        display_order: index,
+        options: field.options ?? null,
+      }))
+      const { error } = await supabase.from('registration_fields').insert(initial)
+      if (error) throw error
+      await loadSettings()
+      setNotice('Default registration fields added. You can now customize them.')
+    } catch (error) {
+      setPageError(`Could not add registration fields: ${errorMessage(error)}`)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function saveBranding() {
+    if (!orgId) throw new Error('No organization is linked to this account.')
+    if (!isHttpUrl(branding.whatsapp) || !isHttpUrl(branding.websiteUrl)) throw new Error('Enter valid http:// or https:// links for WhatsApp and website.')
+    setSavingBranding(true)
+    setBrandingError(null)
+    try {
+      const values = {
+        organization_id: orgId,
+        marketing_tagline: branding.tagline.trim() || null,
+        contact_phone: branding.phone.trim() || null,
+        whatsapp_url: branding.whatsapp.trim() || null,
+        website_url: branding.websiteUrl.trim() || null,
+        updated_at: new Date().toISOString(),
+      }
+      const { data: existing, error: lookupError } = await supabase.from('organization_settings')
+        .select('id').eq('organization_id', orgId).maybeSingle()
+      if (lookupError) throw lookupError
+      const { error } = existing?.id
+        ? await supabase.from('organization_settings').update(values).eq('id', existing.id).eq('organization_id', orgId)
+        : await supabase.from('organization_settings').insert(values)
+      if (error) throw error
+      setSavedBranding({ ...branding })
+      setNotice('Organization details saved.')
+    } catch (error) {
+      const message = errorMessage(error)
+      setBrandingError(message)
+      throw error
+    } finally { setSavingBranding(false) }
+  }
+
+  function openFieldModal(mode: 'create' | 'edit', field?: RegistrationField) {
+    setFieldModal(mode)
+    setEditingFieldId(field?.id ?? null)
+    setFieldLabel(field?.label ?? '')
+    setFieldKey(field?.field_key ?? '')
+    setFieldType(field?.field_type ?? 'text')
+    setFieldRequired(field?.is_required ?? true)
+    setFieldOptions(field?.options?.join('\n') ?? '')
+    setFieldDirty(false)
+    setFieldError(null)
+    setConfirmDiscard(false)
+  }
+  function requestCloseFieldModal() {
+    if (savingField) return
+    if (fieldDirty) setConfirmDiscard(true)
+    else closeFieldModal()
+  }
+  function closeFieldModal() {
+    setFieldModal(null)
     setEditingFieldId(null)
-    setFieldLabel('')
-    setFieldKey('')
-    setFieldType('text')
-    setIsRequired(true)
-    setOptionsText('')
+    setFieldDirty(false)
+    setConfirmDiscard(false)
     setFieldError(null)
   }
-
-  function openEditModal(field: RegistrationField) {
-    setModalMode('edit')
-    setEditingFieldId(field.id)
-    setFieldLabel(field.label)
-    setFieldKey(field.field_key)
-    setFieldType(field.field_type)
-    setIsRequired(field.is_required)
-    setOptionsText(field.options?.join('\n') ?? '')
+  async function saveField() {
     setFieldError(null)
-  }
-
-  async function handleSaveField(e: React.FormEvent): Promise<boolean> {
-    e.preventDefault()
-    setFieldError(null)
-
-    if (!fieldLabel.trim()) {
-      setFieldError('Field label is required.')
-      return false
-    }
-
-    const cleanKey = slugify(fieldKey || fieldLabel)
-    if (!cleanKey) {
-      setFieldError('Field key must contain letters or numbers.')
-      return false
-    }
-
-    let parsedOptions: string[] | null = null
-    if (['dropdown', 'radio', 'checkbox'].includes(fieldType)) {
-      parsedOptions = optionsText
-        .split(/[\n,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean)
-      if (parsedOptions.length === 0) {
-        setFieldError('Please provide at least one option for dropdown/radio/checkbox fields.')
-        return false
-      }
-    }
-
+    if (!orgId) { setFieldError('No organization is linked to this account.'); return false }
+    if (!fieldLabel.trim()) { setFieldError('Field label is required.'); return false }
+    const cleanKey = fieldModal === 'edit' ? fieldKey : slugify(fieldLabel)
+    if (!cleanKey) { setFieldError('Enter a field label using letters or numbers.'); return false }
+    const needsOptions = ['dropdown', 'radio', 'checkbox'].includes(fieldType)
+    const options = needsOptions ? [...new Set(fieldOptions.split(/[\n,]+/).map(item => item.trim()).filter(Boolean))] : null
+    if (needsOptions && (!options || options.length === 0)) { setFieldError('Add at least one option for this field type.'); return false }
+    if (fields.some(f => f.field_key === cleanKey && f.id !== editingFieldId)) { setFieldError('A registration field with this name already exists. Please choose another label.'); return false }
     setSavingField(true)
-
-    let updatedFields: RegistrationField[] = []
-
     try {
-      if (modalMode === 'create') {
-        if (fields.some((f) => f.field_key === cleanKey)) {
-          setFieldError(`A field with key "${cleanKey}" already exists. Choose a different label or key.`)
-          setSavingField(false)
-          return false
-        }
-        if (!orgId) throw new Error('No organization is linked to this account.')
-
-        const { data: insertedField, error } = await supabase
-          .from('registration_fields')
-          .insert({
-            organization_id: orgId,
-            label: fieldLabel.trim(),
-            field_key: cleanKey,
-            field_type: fieldType,
-            is_required: isRequired,
-            options: parsedOptions,
-            display_order: fields.length,
-            is_active: true,
-          })
-          .select('*')
-          .single()
+      if (fieldModal === 'create') {
+        const { data, error } = await supabase.from('registration_fields').insert({
+          organization_id: orgId, label: fieldLabel.trim(), field_key: cleanKey, field_type: fieldType,
+          is_required: fieldRequired, options, display_order: fields.reduce((max, field) => Math.max(max, field.display_order), -1) + 1, is_active: true,
+        }).select('*').single()
         if (error) throw error
-        if (!insertedField) throw new Error('Supabase did not return the created field.')
-
-        updatedFields = [...fields, insertedField as RegistrationField]
-        setFields(updatedFields)
-      } else if (modalMode === 'edit' && editingFieldId) {
-        const { error } = await supabase
-          .from('registration_fields')
-          .update({
-            label: fieldLabel.trim(),
-            field_type: fieldType,
-            is_required: isRequired,
-            options: parsedOptions,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', editingFieldId)
+        if (!data) throw new Error('No field was returned after saving.')
+        setFields(prev => [...prev, data as RegistrationField])
+        setNotice('Registration field created.')
+      } else if (fieldModal === 'edit' && editingFieldId) {
+        const { data, error } = await supabase.from('registration_fields').update({
+          label: fieldLabel.trim(), field_type: fieldType, is_required: fieldRequired,
+          options, updated_at: new Date().toISOString(),
+        }).eq('id', editingFieldId).eq('organization_id', orgId).select('*').single()
         if (error) throw error
-
-        updatedFields = fields.map((field) =>
-          field.id === editingFieldId
-            ? {
-                ...field,
-                label: fieldLabel.trim(),
-                field_type: fieldType,
-                is_required: isRequired,
-                options: parsedOptions,
-              }
-            : field
-        )
-        setFields(updatedFields)
-      }
+        if (!data) throw new Error('The field could not be found.')
+        setFields(prev => prev.map(f => f.id === editingFieldId ? data as RegistrationField : f))
+        setNotice('Registration field updated.')
+      } else throw new Error('No field is selected.')
+      closeFieldModal()
+      return true
     } catch (error) {
-      setFieldError(error instanceof Error ? error.message : 'Could not save the registration field.')
-      setSavingField(false)
+      setFieldError(errorMessage(error))
       return false
-    }
-
-    setSavingField(false)
-    setModalMode(null)
-    setHasUnsavedChanges(false)
-    markClean()
-    return true
+    } finally { setSavingField(false) }
   }
 
-  function closeFieldEditor() {
-    setModalMode(null)
-    setHasUnsavedChanges(false)
-    setFieldError(null)
+  async function toggleVisibility(field: RegistrationField) {
+    if (!orgId || busyId) return
+    setBusyId(field.id)
+    setPageError(null)
+    try {
+      const { data, error } = await supabase.from('registration_fields').update({ is_active: !field.is_active })
+        .eq('id', field.id).eq('organization_id', orgId).select('*').single()
+      if (error) throw error
+      if (!data) throw new Error('Field not found.')
+      setFields(prev => prev.map(f => f.id === field.id ? data as RegistrationField : f))
+    } catch (error) { setPageError(`Could not change field visibility: ${errorMessage(error)}`) }
+    finally { setBusyId(null) }
   }
 
-  // Swap places with Up or Down arrows
   async function moveField(index: number, direction: -1 | 1) {
-    const newIndex = index + direction
-    if (newIndex < 0 || newIndex >= fields.length) return
-
-    const updated = [...fields]
-    const [movedItem] = updated.splice(index, 1)
-    updated.splice(newIndex, 0, movedItem)
-
-    const reordered = updated.map((f, idx) => ({
-      ...f,
-      display_order: idx,
-    }))
-
-    setFields(reordered)
-
-    // Sync to Supabase if available
+    const targetIndex = index + direction
+    if (!orgId || busyId || !canReorder || targetIndex < 0 || targetIndex >= fields.length) return
+    const first = fields[index], second = fields[targetIndex]
+    if (!first || !second) return
+    setBusyId(first.id)
+    setPageError(null)
     try {
-      const a = reordered[index]
-      const b = reordered[newIndex]
-      await Promise.all([
-        supabase.from('registration_fields').update({ display_order: a.display_order }).eq('id', a.id),
-        supabase.from('registration_fields').update({ display_order: b.display_order }).eq('id', b.id),
+      const [firstResult, secondResult] = await Promise.all([
+        supabase.from('registration_fields').update({ display_order: second.display_order }).eq('id', first.id).eq('organization_id', orgId),
+        supabase.from('registration_fields').update({ display_order: first.display_order }).eq('id', second.id).eq('organization_id', orgId),
       ])
-    } catch {}
+      if (firstResult.error) throw firstResult.error
+      if (secondResult.error) throw secondResult.error
+      setFields(prev => {
+        const next = [...prev]
+        const a = next[index], b = next[targetIndex]
+        next[index] = { ...b, display_order: a.display_order }
+        next[targetIndex] = { ...a, display_order: b.display_order }
+        return next
+      })
+    } catch (error) {
+      setPageError(`Could not reorder fields: ${errorMessage(error)}. Reload settings before trying again.`)
+    } finally { setBusyId(null) }
   }
 
-  // Toggle Hide / Show (Active / Inactive)
-  async function toggleFieldActive(field: RegistrationField) {
-    const nextState = !field.is_active
-    const updated = fields.map((f) => (f.id === field.id ? { ...f, is_active: nextState } : f))
-
-    setFields(updated)
-
-    // Sync to Supabase in background
+  async function deleteField() {
+    if (!deleteTarget || !orgId || busyId) return
+    const target = deleteTarget
+    setBusyId(target.id)
+    setPageError(null)
     try {
-      await supabase.from('registration_fields').update({ is_active: nextState }).eq('id', field.id)
-    } catch {}
-  }
-
-  // Confirm delete of field
-  async function handleConfirmDelete() {
-    if (!fieldToDelete) return
-    const targetId = fieldToDelete.id
-
-    const updated = fields
-      .filter((f) => f.id !== targetId)
-      .map((f, idx) => ({ ...f, display_order: idx }))
-
-    setFields(updated)
-    setFieldToDelete(null)
-
-    // Sync to Supabase
-    try {
-      await supabase.from('registration_fields').delete().eq('id', targetId)
-    } catch {}
-  }
-
-  async function handleSaveBranding(e: React.FormEvent) {
-    e.preventDefault()
-    setSavingSettings(true)
-
-    try {
-      if (orgId) {
-        await supabase.from('organization_settings').upsert({
-          organization_id: orgId,
-          marketing_tagline: tagline.trim() || null,
-          contact_phone: phone.trim() || null,
-          whatsapp_url: whatsapp.trim() || null,
-          website_url: websiteUrl.trim() || null,
-          updated_at: new Date().toISOString(),
-        })
-      }
-    } catch {}
-
-    setSavingSettings(false)
-    setHasUnsavedChanges(false)
-    markClean()
-    setSettingsSavedMessage(true)
-    setTimeout(() => setSettingsSavedMessage(false), 2500)
+      const { error } = await supabase.from('registration_fields').delete().eq('id', target.id).eq('organization_id', orgId)
+      if (error) throw error
+      setFields(prev => prev.filter(f => f.id !== target.id))
+      setDeleteTarget(null)
+      setNotice(`Deleted "${target.label}".`)
+    } catch (error) { setPageError(`Could not delete field: ${errorMessage(error)}`) }
+    finally { setBusyId(null) }
   }
 
   const savePendingChanges = async () => {
-    const preventDefault = () => {}
-    if (modalMode) {
-      if (!(await handleSaveField({ preventDefault } as React.FormEvent))) {
-        throw new Error('Please fix the registration field before saving.')
-      }
-    } else {
-      await handleSaveBranding({ preventDefault } as React.FormEvent)
+    if (fieldModal && fieldDirty) {
+      if (!(await saveField())) throw new Error('Fix the field errors before leaving the page.')
     }
+    if (brandingDirty) await saveBranding()
   }
-  const markClean = useUnsavedChanges(hasUnsavedChanges, savePendingChanges)
+  const markClean = useUnsavedChanges(brandingDirty || Boolean(fieldModal && fieldDirty), savePendingChanges)
 
-  return (
-    <AdminLayout
-      title="Registration Form & Organization Settings"
-      subtitle="Customize what students must fill out before taking assessments and your report card branding"
-    >
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 max-w-7xl">
-        {/* LEFT COLUMN: Registration Form Builder & Settings (7 cols) */}
-        <div className="lg:col-span-7 space-y-6 min-w-0">
-          {/* Form Builder Card */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-2xs">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-100">
-              <div>
-                <h2 className="text-base font-bold text-slate-900">Student Registration Fields</h2>
-                <p className="text-xs text-slate-500">
-                  Manage required student intake fields before testing begins.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={openCreateModal}
-                className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-3.5 py-2 rounded-xl transition flex items-center gap-1.5 shrink-0 shadow-2xs"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>Add Custom Field</span>
-              </button>
-            </div>
-
-            {loading ? (
-              <p className="text-xs text-slate-400 py-4 text-center">Loading fields...</p>
-            ) : fields.length === 0 ? (
-              <div className="text-center py-8 border-2 border-dashed border-slate-200 rounded-xl">
-                <p className="text-sm font-medium text-slate-600">No registration fields set up.</p>
-                <p className="text-xs text-slate-400 mt-1">
-                  Add fields like "Full Name", "Parent WhatsApp", "Grade", etc.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                {fields.map((f, index) => (
-                  <div
-                    key={f.id}
-                    className={`border rounded-xl p-3.5 flex items-center justify-between gap-3 transition ${
-                      f.is_active
-                        ? 'bg-slate-50/70 border-slate-200 shadow-2xs'
-                        : 'bg-slate-100/60 border-slate-200 opacity-60'
-                    }`}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-bold text-sm text-slate-900 truncate">{f.label}</span>
-                        <span className="text-[11px] font-mono text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">
-                          {f.field_key}
-                        </span>
-                        <span className="text-xs bg-blue-50 text-blue-700 font-medium px-2 py-0.5 rounded-md">
-                          {FIELD_TYPE_LABELS[f.field_type] || f.field_type}
-                        </span>
-                        {f.is_required ? (
-                          <span className="text-[11px] font-bold text-rose-600 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded">
-                            Required *
-                          </span>
-                        ) : (
-                          <span className="text-[11px] text-slate-500 bg-slate-200 px-1.5 py-0.5 rounded">
-                            Optional
-                          </span>
-                        )}
-                        {!f.is_active && (
-                          <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full flex items-center gap-1">
-                            <EyeOff className="h-2.5 w-2.5" />
-                            <span>Hidden</span>
-                          </span>
-                        )}
-                      </div>
-
-                      {f.options && f.options.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-1.5">
-                          {f.options.map((opt, i) => (
-                            <span
-                              key={i}
-                              className="text-[11px] bg-white border border-slate-200 text-slate-600 px-1.5 py-0.5 rounded"
-                            >
-                              {opt}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Reorder, Edit, Toggle Hide, and Delete Actions */}
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => moveField(index, -1)}
-                        disabled={index === 0}
-                        title="Move Up"
-                        className="p-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 disabled:opacity-30 transition cursor-pointer"
-                      >
-                        <ArrowUp className="h-3.5 w-3.5 text-slate-700" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => moveField(index, 1)}
-                        disabled={index === fields.length - 1}
-                        title="Move Down"
-                        className="p-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 disabled:opacity-30 transition cursor-pointer"
-                      >
-                        <ArrowDown className="h-3.5 w-3.5 text-slate-700" />
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => openEditModal(f)}
-                        className="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium px-2.5 py-1 rounded-lg transition"
-                      >
-                        Edit
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => toggleFieldActive(f)}
-                        title={f.is_active ? 'Hide field from student registration' : 'Show field in student registration'}
-                        className={`text-xs px-2.5 py-1 rounded-lg font-medium transition cursor-pointer flex items-center gap-1 ${
-                          f.is_active
-                            ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
-                            : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
-                        }`}
-                      >
-                        {f.is_active ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                        <span>{f.is_active ? 'Hide' : 'Show'}</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setFieldToDelete(f)}
-                        className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                        title="Delete field"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Branding & Marketing Details Form */}
-          <form
-            onSubmit={handleSaveBranding}
-            onChangeCapture={() => setHasUnsavedChanges(true)}
-            className="bg-white border border-slate-200 rounded-2xl p-5 shadow-2xs space-y-4"
-          >
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <div>
-                <h2 className="text-base font-bold text-slate-900">Organization &amp; Report Branding</h2>
-                <p className="text-xs text-slate-500">
-                  Shown at the header and footer of student diagnostic results.
-                </p>
-              </div>
-              {settingsSavedMessage && (
-                <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200 flex items-center gap-1">
-                  <Check className="h-3 w-3" />
-                  <span>Saved!</span>
-                </span>
-              )}
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Marketing Slogan / Footer Note
-              </label>
-              <input
-                type="text"
-                value={tagline}
-                onChange={(e) => setTagline(e.target.value)}
-                placeholder="e.g. Master SAT & ACT Math with targeted diagnostic courses"
-                className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2.5 focus:border-blue-500 focus:outline-none"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Contact Phone
-                </label>
-                <input
-                  type="text"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="+1 (555) 019-2834"
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2.5 focus:border-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  WhatsApp Contact Link
-                </label>
-                <input
-                  type="text"
-                  value={whatsapp}
-                  onChange={(e) => setWhatsapp(e.target.value)}
-                  placeholder="https://wa.me/15550192834"
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2.5 focus:border-blue-500 focus:outline-none"
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={savingSettings}
-              className="px-4 py-2 bg-slate-900 hover:bg-black text-white text-xs font-semibold rounded-xl transition"
-            >
-              {savingSettings ? 'Saving...' : 'Save Organization Details'}
-            </button>
-          </form>
+  const renderPreview = () => (
+    <SettingsPanel title="Student registration preview" description="See what students will see when they register."
+      action={<span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700"><Eye className="h-3.5 w-3.5" /> Preview only</span>}>
+      <div className="mx-auto max-w-2xl space-y-5">
+        <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <Smartphone className="h-5 w-5 text-blue-600" />
+          <div><p className="text-sm font-bold text-slate-900">Before the assessment begins</p><p className="text-xs text-slate-500">{activeFields.length} visible fields · {activeFields.filter(f => f.is_required).length} required</p></div>
         </div>
-
-        {/* RIGHT COLUMN: Interactive Live Intake Preview (5 cols) */}
-        <div className="lg:col-span-5 min-w-0">
-          <div className="sticky top-20 bg-white border border-slate-200 rounded-2xl p-5 shadow-2xs space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
-                  <Smartphone className="h-4 w-4" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-slate-900">Student Intake Live Preview</h3>
-                  <p className="text-[10px] text-slate-400">
-                    Active fields visible to students before testing
-                  </p>
-                </div>
-              </div>
-              <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                {fields.filter((f) => f.is_active).length} Active
-              </span>
-            </div>
-
-            <div className="space-y-4 max-h-[600px] overflow-y-auto pr-1">
-              {fields.filter((f) => f.is_active).length === 0 ? (
-                <p className="text-xs text-slate-400 py-6 text-center">
-                  No active registration fields to preview. All fields are currently hidden.
-                </p>
-              ) : (
-                fields
-                  .filter((f) => f.is_active)
-                  .map((field) => (
-                    <DynamicRegistrationField
-                      key={field.id}
-                      field={field}
-                      value={previewValues[field.field_key] ?? ''}
-                      onChange={(val) =>
-                        setPreviewValues((prev) => ({ ...prev, [field.field_key]: val }))
-                      }
-                    />
-                  ))
-              )}
-
-              <button
-                type="button"
-                disabled
-                className="w-full bg-blue-600 text-white text-xs font-semibold py-2.5 rounded-xl opacity-80 cursor-not-allowed mt-2"
-              >
-                Start Assessment →
-              </button>
-            </div>
-          </div>
-        </div>
+        {activeFields.length === 0 ? <SettingsNotice kind="info">There are no visible registration fields. Enable a field in the Registration fields tab to preview it.</SettingsNotice> :
+          activeFields.map(field => <div key={field.id} className="rounded-xl border border-slate-100 bg-white p-2">
+            <DynamicRegistrationField field={field} value={previewValues[field.field_key] ?? ''} onChange={value => setPreviewValues(prev => ({ ...prev, [field.field_key]: value }))} />
+          </div>)}
+        <button type="button" disabled className="w-full cursor-not-allowed rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white opacity-65">Start Assessment (preview only)</button>
       </div>
-
-      {/* Create / Edit Field Modal */}
-      {modalMode !== null && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4"
-          role="dialog"
-        >
-          <div className="bg-white rounded-3xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h2 className="text-base font-bold text-slate-900">
-                {modalMode === 'create' ? 'Add Registration Field' : 'Edit Registration Field'}
-              </h2>
-              <button
-                type="button"
-                onClick={closeFieldEditor}
-                className="text-slate-400 hover:text-slate-600 p-1"
-              >
-                ✕
-              </button>
-            </div>
-
-            {fieldError && (
-              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-xl flex items-center gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>{fieldError}</span>
-              </div>
-            )}
-
-            <form
-              onSubmit={handleSaveField}
-              onChangeCapture={() => setHasUnsavedChanges(true)}
-              className="space-y-4"
-            >
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Field Label <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Current Grade Level"
-                  value={fieldLabel}
-                  onChange={(e) => handleLabelChange(e.target.value)}
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2.5 focus:border-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Field Key (ID)
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. current_grade"
-                  value={fieldKey}
-                  onChange={(e) => setFieldKey(slugify(e.target.value))}
-                  className="w-full text-xs font-mono border border-slate-300 rounded-xl px-3 py-2.5 focus:border-blue-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Field Type</label>
-                <select
-                  value={fieldType}
-                  onChange={(e) => setFieldType(e.target.value as FieldType)}
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2.5 bg-white focus:border-blue-500 focus:outline-none"
-                >
-                  {Object.entries(FIELD_TYPE_LABELS).map(([val, lbl]) => (
-                    <option key={val} value={val}>
-                      {lbl}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {['dropdown', 'radio', 'checkbox'].includes(fieldType) && (
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Options (one per line) <span className="text-rose-500">*</span>
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={optionsText}
-                    onChange={(e) => setOptionsText(e.target.value)}
-                    placeholder="Option 1&#10;Option 2&#10;Option 3"
-                    className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2 focus:border-blue-500 focus:outline-none"
-                  />
-                </div>
-              )}
-
-              <div className="flex items-center gap-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="isRequiredField"
-                  checked={isRequired}
-                  onChange={(e) => setIsRequired(e.target.checked)}
-                  className="rounded text-blue-600 focus:ring-blue-500"
-                />
-                <label htmlFor="isRequiredField" className="text-xs text-slate-700 cursor-pointer">
-                  Require student to fill this field before starting assessment
-                </label>
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={closeFieldEditor}
-                  className="px-4 py-2 border border-slate-200 text-xs font-semibold text-slate-600 rounded-xl hover:bg-slate-50 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingField}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-xl transition"
-                >
-                  {savingField ? 'Saving...' : 'Save Field'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* In-app Field Delete Confirmation Modal */}
-      {fieldToDelete && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4"
-          role="dialog"
-        >
-          <div className="bg-white rounded-3xl shadow-xl border border-slate-200 max-w-sm w-full p-6 space-y-4">
-            <div className="w-12 h-12 rounded-2xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
-              <Trash2 className="h-6 w-6" />
-            </div>
-            <div className="text-center">
-              <h3 className="text-base font-bold text-slate-900">Delete Registration Field</h3>
-              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                Are you sure you want to remove <strong className="text-slate-800">"{fieldToDelete.label}"</strong>?
-                Historical test responses will still be preserved.
-              </p>
-            </div>
-            <div className="flex gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setFieldToDelete(null)}
-                className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmDelete}
-                className="flex-1 px-4 py-2.5 bg-rose-600 hover:bg-rose-700 rounded-xl text-xs font-semibold text-white transition"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </AdminLayout>
+    </SettingsPanel>
   )
+
+  return <AdminLayout title="System Settings & Administration" subtitle="Student registration, organization identity, and intake preview">
+    <div className="mx-auto max-w-7xl space-y-5 pb-10">
+      <SettingsWorkspaceHeader active={tab} onChange={setTab} total={fields.length} activeCount={activeFields.length} required={activeFields.filter(f => f.is_required).length} hidden={fields.length - activeFields.length} />
+      {pageError && <SettingsNotice kind="error" onDismiss={() => setPageError(null)}>{pageError} <button type="button" onClick={() => void loadSettings()} className="ml-2 font-semibold underline">Reload</button></SettingsNotice>}
+      {notice && <SettingsNotice kind="success" onDismiss={() => setNotice(null)}>{notice}</SettingsNotice>}
+      {loading ? <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500" role="status">Loading organization settings…</div> : <>
+        {tab === 'fields' && <SettingsPanel title="Student registration fields" description="Search, edit, reorder, or hide the fields students complete before taking an assessment."
+          action={<button type="button" onClick={() => openFieldModal('create')} className={primaryButton}><Plus className="h-4 w-4" /> Add field</button>}>
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row">
+            <label className="relative block flex-1"><span className="sr-only">Search registration fields</span><Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" /><input className={`${inputClass} pl-9`} placeholder="Search fields by name or type…" value={search} onChange={e => setSearch(e.target.value)} /></label>
+            <label className="sr-only" htmlFor="field-visibility">Filter visibility</label>
+            <select id="field-visibility" className={`${inputClass} sm:w-44`} value={visibility} onChange={e => setVisibility(e.target.value as 'all' | 'active' | 'hidden')}><option value="all">All fields</option><option value="active">Visible fields</option><option value="hidden">Hidden fields</option></select>
+          </div>
+          {!canReorder && <p className="mb-3 text-xs text-slate-500">Clear search and choose All fields to reorder the full form.</p>}
+          {fields.length === 0 ? <div className="rounded-xl border-2 border-dashed border-slate-200 p-10 text-center"><p className="font-semibold text-slate-800">No registration fields yet</p><p className="mt-1 text-sm text-slate-500">Add your own fields or start with the four standard student fields.</p><button type="button" disabled={busyId !== null} onClick={() => void initializeRegistrationFields()} className={`${primaryButton} mt-4`}>Add four standard fields</button></div> : filteredFields.length === 0 ? <div className="rounded-xl border border-slate-200 p-8 text-center text-sm text-slate-500">No fields match these filters.</div> :
+            <div className="space-y-3">{filteredFields.map(field => {
+              const index = fields.findIndex(f => f.id === field.id)
+              return <div key={field.id} className={`flex flex-col gap-4 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between ${field.is_active ? 'border-slate-200 bg-slate-50/60' : 'border-slate-200 bg-slate-100/70'}`}>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-bold text-slate-900">{field.label}</span><span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${field.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>{field.is_active ? 'Visible' : 'Hidden'}</span>{field.is_required && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800">Required</span>}</div>
+                  <div className="flex flex-wrap gap-2 text-xs text-slate-500"><span className="rounded-md border border-slate-200 bg-white px-2 py-1">{FIELD_TYPE_LABELS[field.field_type] ?? field.field_type}</span>{field.options && field.options.length > 0 && <span className="rounded-md border border-slate-200 bg-white px-2 py-1">{field.options.length} choices</span>}</div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" title="Move up" aria-label={`Move ${field.label} up`} disabled={!canReorder || index === 0 || busyId !== null} onClick={() => void moveField(index, -1)} className={secondaryButton}><ArrowUp className="h-4 w-4" /></button>
+                  <button type="button" title="Move down" aria-label={`Move ${field.label} down`} disabled={!canReorder || index === fields.length - 1 || busyId !== null} onClick={() => void moveField(index, 1)} className={secondaryButton}><ArrowDown className="h-4 w-4" /></button>
+                  <button type="button" onClick={() => openFieldModal('edit', field)} className={secondaryButton}><Pencil className="h-4 w-4" /> Edit</button>
+                  <button type="button" disabled={busyId !== null} onClick={() => void toggleVisibility(field)} className={secondaryButton}>{field.is_active ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}{field.is_active ? 'Hide' : 'Show'}</button>
+                  <button type="button" disabled={busyId !== null} onClick={() => setDeleteTarget(field)} aria-label={`Delete ${field.label}`} title="Delete field" className="rounded-xl p-2.5 text-rose-600 hover:bg-rose-50 disabled:opacity-40"><Trash2 className="h-4 w-4" /></button>
+                </div>
+              </div>
+            })}</div>}
+          <div className="mt-5 flex items-start gap-2 rounded-xl bg-blue-50 p-3 text-xs text-blue-800"><LockKeyhole className="mt-0.5 h-4 w-4 shrink-0" /> Hiding a field removes it from new student registrations without deleting it.</div>
+        </SettingsPanel>}
+        {tab === 'branding' && <SettingsPanel title="Organization & report branding" description="Edit the contact details and footer information shown in your student-facing materials." action={brandingDirty ? <span className="text-xs font-semibold text-amber-700">Unsaved changes</span> : <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700"><Check className="h-4 w-4" /> Saved</span>}>
+          <form className="max-w-3xl space-y-5" onSubmit={async (e: FormEvent<HTMLFormElement>) => { e.preventDefault(); try { await saveBranding(); markClean() } catch {} }}>
+            {brandingError && <SettingsNotice kind="error" onDismiss={() => setBrandingError(null)}>{brandingError}</SettingsNotice>}
+            <div><label htmlFor="org-tagline" className="mb-1.5 block text-sm font-semibold text-slate-700">Marketing tagline / report footer</label><input id="org-tagline" className={inputClass} value={branding.tagline} onChange={e => setBranding(prev => ({ ...prev, tagline: e.target.value }))} placeholder="Your organization tagline" /></div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div><label htmlFor="org-phone" className="mb-1.5 block text-sm font-semibold text-slate-700">Contact phone</label><input id="org-phone" className={inputClass} value={branding.phone} onChange={e => setBranding(prev => ({ ...prev, phone: e.target.value }))} placeholder="+20 …" /></div>
+              <div><label htmlFor="org-whatsapp" className="mb-1.5 block text-sm font-semibold text-slate-700">WhatsApp URL</label><input id="org-whatsapp" className={inputClass} type="url" value={branding.whatsapp} onChange={e => setBranding(prev => ({ ...prev, whatsapp: e.target.value }))} placeholder="https://wa.me/…" /></div>
+            </div>
+            <div><label htmlFor="org-website" className="mb-1.5 block text-sm font-semibold text-slate-700">Website URL</label><input id="org-website" className={inputClass} type="url" value={branding.websiteUrl} onChange={e => setBranding(prev => ({ ...prev, websiteUrl: e.target.value }))} placeholder="https://example.com" /></div>
+            <div className="flex flex-wrap gap-3 border-t border-slate-100 pt-5"><button type="submit" disabled={savingBranding || !brandingDirty} className={primaryButton}><Save className="h-4 w-4" /> {savingBranding ? 'Saving…' : 'Save changes'}</button><button type="button" disabled={savingBranding || !brandingDirty} className={secondaryButton} onClick={() => { setBranding({ ...savedBranding }); setBrandingError(null); markClean() }}><RotateCcw className="h-4 w-4" /> Discard changes</button></div>
+          </form>
+        </SettingsPanel>}
+        {tab === 'preview' && renderPreview()}
+      </>}
+    </div>
+
+    {fieldModal && <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-900/60 p-4" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) requestCloseFieldModal() }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="field-modal-title" className="my-auto w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl sm:p-6">
+        <div className="mb-5 flex items-center justify-between gap-3"><div><h2 id="field-modal-title" className="text-lg font-bold text-slate-900">{fieldModal === 'create' ? 'Add registration field' : 'Edit registration field'}</h2><p className="mt-1 text-sm text-slate-500">Configure how this question appears in student registration.</p></div><button type="button" aria-label="Close field editor" className={secondaryButton} onClick={requestCloseFieldModal}>×</button></div>
+        {fieldError && <div className="mb-4"><SettingsNotice kind="error">{fieldError}</SettingsNotice></div>}
+        {confirmDiscard ? <div className="space-y-4"><SettingsNotice kind="info">Discard the unsaved changes to this field?</SettingsNotice><div className="flex justify-end gap-2"><button type="button" className={secondaryButton} onClick={() => setConfirmDiscard(false)}>Keep editing</button><button type="button" className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-rose-700" onClick={closeFieldModal}>Discard changes</button></div></div> :
+          <form className="space-y-4" onChangeCapture={() => setFieldDirty(true)} onSubmit={async (e: FormEvent<HTMLFormElement>) => { e.preventDefault(); if (await saveField()) markClean() }}>
+            <div><label htmlFor="field-label" className="mb-1.5 block text-sm font-semibold text-slate-700">Field label *</label><input id="field-label" className={inputClass} required value={fieldLabel} onChange={e => setFieldLabel(e.target.value)} placeholder="e.g. Current grade" /></div>
+            <div><label htmlFor="field-type" className="mb-1.5 block text-sm font-semibold text-slate-700">Field type</label><select id="field-type" className={inputClass} value={fieldType} onChange={e => setFieldType(e.target.value as FieldType)}>{Object.entries(FIELD_TYPE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+            {['dropdown', 'radio', 'checkbox'].includes(fieldType) && <div><label htmlFor="field-options" className="mb-1.5 block text-sm font-semibold text-slate-700">Choices (one per line) *</label><textarea id="field-options" className={inputClass} rows={4} value={fieldOptions} onChange={e => setFieldOptions(e.target.value)} placeholder={'Option 1\nOption 2'} /></div>}
+            <label className="flex cursor-pointer items-start gap-3 rounded-xl bg-slate-50 p-3 text-sm text-slate-700"><input type="checkbox" className="mt-1" checked={fieldRequired} onChange={e => setFieldRequired(e.target.checked)} /><span><strong className="block text-slate-900">Required field</strong>Students must complete this before beginning an assessment.</span></label>
+            <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" className={secondaryButton} onClick={requestCloseFieldModal}>Cancel</button><button type="submit" disabled={savingField} className={primaryButton}>{savingField ? 'Saving…' : 'Save field'}</button></div>
+          </form>}
+      </div>
+    </div>}
+
+    {deleteTarget && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4"><div role="alertdialog" aria-modal="true" aria-labelledby="delete-field-title" className="w-full max-w-md space-y-4 rounded-3xl bg-white p-6 shadow-2xl"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-rose-50 text-rose-600"><Trash2 className="h-6 w-6" /></div><h2 id="delete-field-title" className="text-lg font-bold text-slate-900">Delete registration field?</h2><p className="text-sm leading-6 text-slate-600">This will delete <strong>{deleteTarget.label}</strong> from the current registration form. Hiding is safer if you might need the field again. This action does not intentionally alter existing student attempts.</p><div className="flex justify-end gap-2"><button type="button" disabled={busyId !== null} className={secondaryButton} onClick={() => setDeleteTarget(null)}>Cancel</button><button type="button" disabled={busyId !== null} className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-50" onClick={() => void deleteField()}>{busyId === deleteTarget.id ? 'Deleting…' : 'Delete field'}</button></div></div></div>}
+  </AdminLayout>
 }

@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import AdminLayout from '../components/AdminLayout'
+import { LibraryMetric, LibraryPagination } from '../components/library/LibraryUI'
 import 'katex/dist/katex.min.css'
 import { InlineMath, BlockMath } from 'react-katex'
 import {
@@ -25,6 +26,7 @@ import {
   Sparkles,
   Folder,
   FolderPlus,
+  FolderOpen,
   Image as ImageIcon,
   Eye,
   Check,
@@ -33,26 +35,101 @@ import {
   CheckSquare,
   Square,
   Loader2,
+  RefreshCw,
+  BookOpen,
+  MoreHorizontal,
 } from 'lucide-react'
 import {
   questionBankService,
   QuestionBankItem,
   QuestionCollection,
   TaxonomyRegistry,
+  GenericTaxonomy,
+  GenericTaxonomyNode,
 } from '../lib/questionBankService'
 
 export const QuestionBankPage: React.FC = () => {
   const [questions, setQuestions] = useState<QuestionBankItem[]>([])
   const [collections, setCollections] = useState<QuestionCollection[]>([])
   const [taxonomy, setTaxonomy] = useState<TaxonomyRegistry>(() => questionBankService.getTaxonomy() || {})
+  const [genericTaxonomies, setGenericTaxonomies] = useState<GenericTaxonomy[]>([])
+  const [genericTaxonomyNodes, setGenericTaxonomyNodes] = useState<GenericTaxonomyNode[]>([])
+  const [selectedTaxonomyId, setSelectedTaxonomyId] = useState<string>('')
+  const [selectedTaxonomyNodeId, setSelectedTaxonomyNodeId] = useState<string>('all')
   const [selectedCollection, setSelectedCollection] = useState<string>('all')
+  const [showCollectionsList, setShowCollectionsList] = useState(true)
+  const [collapsedCollections, setCollapsedCollections] = useState<string[]>([])
+  const [collectionSearch, setCollectionSearch] = useState('')
+
+  const collectionTree = useMemo(() => {
+    const results: Array<{ collection: QuestionCollection; depth: number }> = []
+    const visited = new Set<string>()
+    const walk = (parent: string | null, depth: number) => {
+      collections.filter(c => (c.parentName || null) === parent).sort((a,b) => a.name.localeCompare(b.name)).forEach(c => {
+        if (visited.has(c.name)) return
+        visited.add(c.name)
+        results.push({ collection: c, depth })
+        walk(c.name, depth + 1)
+      })
+    }
+    walk(null, 0)
+    // Include legacy collections with missing parents without hiding them.
+    collections.forEach(c => { if (!visited.has(c.name)) { visited.add(c.name); results.push({ collection:c, depth:0 }) } })
+    return results
+  }, [collections])
+
+  const visibleCollectionTree = useMemo(() => {
+    const query = collectionSearch.trim().toLowerCase()
+    const byName = new Map(collections.map(c => [c.name, c]))
+    const matching = new Set<string>()
+    if (query) {
+      collections.filter(c => c.name.toLowerCase().includes(query)).forEach(c => {
+        let current: QuestionCollection | undefined = c
+        const seen = new Set<string>()
+        while (current && !seen.has(current.name)) {
+          seen.add(current.name)
+          matching.add(current.name)
+          current = current.parentName ? byName.get(current.parentName) : undefined
+        }
+      })
+    }
+    return collectionTree.filter(({ collection }) => {
+      if (query) return matching.has(collection.name)
+      let parent = collection.parentName
+      const seen = new Set<string>()
+      while (parent && !seen.has(parent)) {
+        if (collapsedCollections.includes(parent)) return false
+        seen.add(parent)
+        parent = byName.get(parent)?.parentName || null
+      }
+      return true
+    })
+  }, [collectionTree, collections, collectionSearch, collapsedCollections])
+
+  const selectedCollectionPath = useMemo(() => {
+    const path: string[] = []
+    const lookup = new Map(collections.map(c => [c.name, c]))
+    let current = selectedCollection !== 'all' ? lookup.get(selectedCollection) : undefined
+    const seen = new Set<string>()
+    while (current && !seen.has(current.name)) {
+      path.unshift(current.name)
+      seen.add(current.name)
+      current = current.parentName ? lookup.get(current.parentName) : undefined
+    }
+    return path
+  }, [collections, selectedCollection])
 
   // Search & Filter state
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedDomain, setSelectedDomain] = useState<string>('all')
   const [selectedChapter, setSelectedChapter] = useState<string>('all')
+  const [selectedLesson, setSelectedLesson] = useState<string>('all')
   const [selectedDifficulty, setSelectedDifficulty] = useState<string>('all')
   const [selectedType, setSelectedType] = useState<string>('all')
+  const [sortMode, setSortMode] = useState<'newest' | 'oldest' | 'prompt' | 'difficulty' | 'collection'>('newest')
+  const [pageSize, setPageSize] = useState(12)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
 
   // Expandable preview cards
   const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(null)
@@ -61,9 +138,10 @@ export const QuestionBankPage: React.FC = () => {
   // Manual Collection Creation & Management state
   const [isCreateCollectionModalOpen, setIsCreateCollectionModalOpen] = useState(false)
   const [newColName, setNewColName] = useState('')
+  const [newColParent, setNewColParent] = useState<string>('')
+  const [newColParentSearch, setNewColParentSearch] = useState('')
   const [newColDescription, setNewColDescription] = useState('')
   const [newColTargetExam, setNewColTargetExam] = useState('EST 1 / SAT Math')
-  const [newColColorTag, setNewColColorTag] = useState('blue')
   const [newColOpenQuestionAfter, setNewColOpenQuestionAfter] = useState(false)
   const [createColError, setCreateColError] = useState<string | null>(null)
 
@@ -71,6 +149,7 @@ export const QuestionBankPage: React.FC = () => {
   const [isEditCollectionModalOpen, setIsEditCollectionModalOpen] = useState(false)
   const [editingColOrigName, setEditingColOrigName] = useState('')
   const [editingColName, setEditingColName] = useState('')
+  const [editingColParent, setEditingColParent] = useState<string>('')
   const [editingColDescription, setEditingColDescription] = useState('')
   const [editingColTargetExam, setEditingColTargetExam] = useState('EST 1 / SAT Math')
   const [editingColColorTag, setEditingColColorTag] = useState('blue')
@@ -80,7 +159,6 @@ export const QuestionBankPage: React.FC = () => {
   const [isDeleteCollectionModalOpen, setIsDeleteCollectionModalOpen] = useState(false)
   const [deletingColName, setDeletingColName] = useState('')
   const [deletingColCount, setDeletingColCount] = useState(0)
-  const [deleteColAction, setDeleteColAction] = useState<'keep' | 'delete'>('keep')
 
   // JSON Import Modal state
   const [isImportModalOpen, setIsImportModalOpen] = useState(false)
@@ -95,42 +173,93 @@ export const QuestionBankPage: React.FC = () => {
   } | null>(null)
   const [customCollectionOverride, setCustomCollectionOverride] = useState('')
   const [isExecutingImport, setIsExecutingImport] = useState(false)
+  const [isSavingCollection, setIsSavingCollection] = useState(false)
+  const [isLoadingQuestionBank, setIsLoadingQuestionBank] = useState(true)
+  const [questionBankLoadError, setQuestionBankLoadError] = useState<string | null>(null)
   const [importStatusMessage, setImportStatusMessage] = useState<{
     type: 'success' | 'error'
     text: string
   } | null>(null)
   const [isDraggingImportFile, setIsDraggingImportFile] = useState(false)
   const importFileInputRef = useRef<HTMLInputElement>(null)
+  // Ref guards prevent duplicate requests even before React re-renders disabled buttons.
+  const collectionRequestInFlightRef = useRef(false)
+  const importRequestInFlightRef = useRef(false)
+  const singleDeleteInFlightRef = useRef(false)
+  const bulkDeleteInFlightRef = useRef(false)
+  const clearBankInFlightRef = useRef(false)
 
   // Load questions and collections
   const reloadData = async () => {
-    const list = questionBankService.getStoredQuestions()
-    setQuestions(list)
-    const cols = questionBankService.getCollectionsList()
-    setCollections(cols)
+    setIsLoadingQuestionBank(true)
+    setQuestionBankLoadError(null)
+
+    // Show cached data immediately, then replace it with the fresh database-backed list.
+    setQuestions(questionBankService.getStoredQuestions())
+    setCollections(questionBankService.getCollectionsList())
     const tax = questionBankService.getTaxonomy()
     setTaxonomy(tax)
 
     try {
-      const [dbList, freshTax] = await Promise.all([
+      const [dbList, , freshTax, freshGenericTaxonomies] = await Promise.all([
         questionBankService.fetchQuestionsFromDatabase(),
+        questionBankService.fetchCollectionsFromDatabase(),
         questionBankService.fetchTaxonomy().catch(() => tax),
+        questionBankService.fetchGenericTaxonomies().catch(() => []),
       ])
+
       if (Array.isArray(dbList)) {
         setQuestions(dbList)
       }
+
+      // Rebuild the displayed list after both database-backed loads complete.
+      // getCollectionsList merges persisted collections with collection names
+      // discovered from the freshly hydrated questions and computes live counts.
+      setCollections(questionBankService.getCollectionsList())
+
       if (freshTax && typeof freshTax === 'object') {
         setTaxonomy(freshTax)
       }
-      // Also ensure any unlinked Supabase questions are backfilled with taxonomy IDs
+
+      const activeGenericTaxonomies = Array.isArray(freshGenericTaxonomies)
+        ? freshGenericTaxonomies
+        : []
+      setGenericTaxonomies(activeGenericTaxonomies)
+
+      const currentTaxonomyId = selectedTaxonomyId
+      // Opening Question Bank must show every question by default. A single
+      // available taxonomy is still a filter, so never select it automatically.
+      // Preserve a taxonomy only when the teacher has explicitly selected it.
+      const nextTaxonomyId =
+        currentTaxonomyId && activeGenericTaxonomies.some((item) => item.id === currentTaxonomyId)
+          ? currentTaxonomyId
+          : ''
+
+      if (nextTaxonomyId !== currentTaxonomyId) {
+        setSelectedTaxonomyId(nextTaxonomyId)
+        setSelectedTaxonomyNodeId('all')
+      }
+
+      if (nextTaxonomyId) {
+        const nodes = await questionBankService.fetchGenericTaxonomyNodes(nextTaxonomyId)
+        setGenericTaxonomyNodes(nodes)
+      } else {
+        setGenericTaxonomyNodes([])
+        setSelectedTaxonomyNodeId('all')
+      }
+
+      // Also ensure any unlinked Supabase questions are backfilled with legacy compatibility IDs.
       questionBankService.backfillSupabaseQuestionsTaxonomy().catch(() => {})
-    } catch (e) {
+    } catch (e: any) {
       console.warn('Notice loading questions and taxonomy from database:', e)
+      setQuestionBankLoadError(e?.message || 'Could not load the Question Bank. Please try again.')
+    } finally {
+      setIsLoadingQuestionBank(false)
     }
   }
 
   useEffect(() => {
-    reloadData()
+    void reloadData()
     const unsubscribe = questionBankService.subscribeTaxonomy((latestTax) => {
       setTaxonomy(latestTax || {})
     })
@@ -257,12 +386,15 @@ export const QuestionBankPage: React.FC = () => {
 
   // Execute import into general bank
   const handleExecuteImport = async () => {
+    if (importRequestInFlightRef.current) return
     if (!jsonFileContent.trim()) {
-      alert('Please select or paste a valid JSON file.')
+      setImportStatusMessage({ type: 'error', text: 'Please select or paste a valid JSON file.' })
       return
     }
 
+    importRequestInFlightRef.current = true
     setIsExecutingImport(true)
+    setImportStatusMessage({ type: 'success', text: 'Importing questions… Please wait.' })
     try {
       const parsed = JSON.parse(jsonFileContent)
       const res = await questionBankService.importQuestionCollection(
@@ -279,16 +411,17 @@ export const QuestionBankPage: React.FC = () => {
         setCustomCollectionOverride('')
         setImportStatusMessage({
           type: 'success',
-          text: `Successfully imported ${res.count} question(s) into collection "${res.collectionName}" and saved to database!`,
+          text: `Imported ${res.count} question(s) into "${res.collectionName}".`,
         })
         setSelectedCollection('all')
       } else {
-        alert(`Import failed: ${res.errors?.join(', ') || 'Unknown error'}`)
+        setImportStatusMessage({ type: 'error', text: `Import failed: ${res.errors?.join(', ') || 'Unknown error'}` })
       }
     } catch (err: any) {
-      alert(`Invalid JSON format: ${err.message}`)
+      setImportStatusMessage({ type: 'error', text: `Import failed: ${err?.message || 'Invalid JSON format.'}` })
     } finally {
       setIsExecutingImport(false)
+      importRequestInFlightRef.current = false
     }
   }
 
@@ -324,8 +457,9 @@ export const QuestionBankPage: React.FC = () => {
   }
 
   // Handle manual collection creation
-  const handleCreateCollection = (e?: React.FormEvent) => {
+  const handleCreateCollection = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
+    if (collectionRequestInFlightRef.current) return
     setCreateColError(null)
 
     if (!newColName.trim()) {
@@ -333,12 +467,13 @@ export const QuestionBankPage: React.FC = () => {
       return
     }
 
-    const result = questionBankService.createCollection(
-      newColName.trim(),
-      newColDescription.trim(),
-      newColTargetExam,
-      newColColorTag
-    )
+    collectionRequestInFlightRef.current = true
+    setIsSavingCollection(true)
+    setImportStatusMessage({ type: 'success', text: 'Creating collection… Please wait.' })
+    try {
+      const result = await questionBankService.createCollectionAndPersist(
+        newColName.trim(), newColDescription.trim(), newColTargetExam, 'blue', newColParent || null
+      )
 
     if (!result.success) {
       setCreateColError(result.error || 'Failed to create collection.')
@@ -346,7 +481,7 @@ export const QuestionBankPage: React.FC = () => {
     }
 
     const createdName = result.collection!.name
-    reloadData()
+    await reloadData()
     setSelectedCollection(createdName)
     setIsCreateCollectionModalOpen(false)
     setNewColName('')
@@ -358,8 +493,14 @@ export const QuestionBankPage: React.FC = () => {
       text: `Collection "${createdName}" created successfully! You can now add questions to it.`,
     })
 
-    if (newColOpenQuestionAfter) {
-      window.location.href = `/admin/questions/new?collection=${encodeURIComponent(createdName)}`
+      if (newColOpenQuestionAfter) {
+        window.location.href = `/admin/questions/new?collection=${encodeURIComponent(createdName)}`
+      }
+    } catch (err: any) {
+      setCreateColError(err?.message || 'Failed to create collection.')
+    } finally {
+      setIsSavingCollection(false)
+      collectionRequestInFlightRef.current = false
     }
   }
 
@@ -367,6 +508,7 @@ export const QuestionBankPage: React.FC = () => {
   const handleOpenEditCollection = (col: QuestionCollection) => {
     setEditingColOrigName(col.name)
     setEditingColName(col.name)
+    setEditingColParent(col.parentName || '')
     setEditingColDescription(col.description || '')
     setEditingColTargetExam(col.targetExam || 'EST 1 / SAT Math')
     setEditingColColorTag(col.colorTag || 'blue')
@@ -375,8 +517,9 @@ export const QuestionBankPage: React.FC = () => {
   }
 
   // Handle save edit collection
-  const handleSaveEditCollection = (e?: React.FormEvent) => {
+  const handleSaveEditCollection = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
+    if (collectionRequestInFlightRef.current) return
     setEditColError(null)
 
     if (!editingColName.trim()) {
@@ -384,48 +527,67 @@ export const QuestionBankPage: React.FC = () => {
       return
     }
 
-    const res = questionBankService.updateCollection(editingColOrigName, {
-      name: editingColName.trim(),
-      description: editingColDescription.trim(),
-      targetExam: editingColTargetExam,
-      colorTag: editingColColorTag,
-    })
+    collectionRequestInFlightRef.current = true
+    setIsSavingCollection(true)
+    setImportStatusMessage({ type: 'success', text: 'Saving collection changes… Please wait.' })
+    try {
+      const res = await questionBankService.updateCollectionAndPersist(editingColOrigName, {
+        name: editingColName.trim(), parentName: editingColParent || null, description: editingColDescription.trim(),
+        targetExam: editingColTargetExam, colorTag: editingColColorTag,
+      })
 
     if (!res.success) {
       setEditColError(res.error || 'Failed to update collection.')
       return
     }
 
-    reloadData()
+    await reloadData()
     if (selectedCollection === editingColOrigName) {
       setSelectedCollection(editingColName.trim())
     }
     setIsEditCollectionModalOpen(false)
-    setImportStatusMessage({
-      type: 'success',
-      text: `Collection "${editingColName.trim()}" updated successfully!`,
-    })
+      setImportStatusMessage({
+        type: 'success',
+        text: `Collection "${editingColName.trim()}" updated successfully!`,
+      })
+    } catch (err: any) {
+      setEditColError(err?.message || 'Failed to update collection.')
+    } finally {
+      setIsSavingCollection(false)
+      collectionRequestInFlightRef.current = false
+    }
   }
 
   // Handle delete collection
   const handleOpenDeleteCollection = (colName: string, count: number) => {
     setDeletingColName(colName)
     setDeletingColCount(count)
-    setDeleteColAction('keep')
     setIsDeleteCollectionModalOpen(true)
   }
 
-  const handleConfirmDeleteCollection = () => {
-    questionBankService.deleteCollection(deletingColName, deleteColAction === 'delete')
-    reloadData()
+  const handleConfirmDeleteCollection = async () => {
+    if (collectionRequestInFlightRef.current) return
+    collectionRequestInFlightRef.current = true
+    setIsSavingCollection(true)
+    setImportStatusMessage({ type: 'success', text: 'Deleting collection… Please wait.' })
+    try {
+      const result = await questionBankService.deleteCollectionAndPersist(deletingColName, false)
+      if (!result.success) throw new Error(result.error || 'Failed to delete collection.')
+    await reloadData()
     if (selectedCollection === deletingColName) {
       setSelectedCollection('all')
     }
     setIsDeleteCollectionModalOpen(false)
-    setImportStatusMessage({
-      type: 'success',
-      text: `Collection "${deletingColName}" removed.`,
-    })
+      setImportStatusMessage({
+        type: 'success',
+        text: `Collection "${deletingColName}" removed. Its questions remain in General Question Bank; subcollections move up one level.`,
+      })
+    } catch (err: any) {
+      setImportStatusMessage({ type: 'error', text: err?.message || 'Failed to delete collection.' })
+    } finally {
+      setIsSavingCollection(false)
+      collectionRequestInFlightRef.current = false
+    }
   }
 
   // Delete question confirmation state
@@ -444,18 +606,20 @@ export const QuestionBankPage: React.FC = () => {
   }
 
   const handleConfirmDeleteQuestion = async () => {
-    if (!questionToDelete) return
+    if (singleDeleteInFlightRef.current || !questionToDelete) return
+    singleDeleteInFlightRef.current = true
     const id = questionToDelete.id
     setIsDeletingSingle(true)
-    // Instant optimistic update
-    setQuestions((prev) => prev.filter((item) => item.id !== id))
-    setSelectedQuestionIds((prev) => prev.filter((item) => item !== id))
+    setImportStatusMessage({ type: 'success', text: 'Deleting question… Please wait.' })
+    // Wait for the atomic database transaction before changing the local list.
     try {
       await questionBankService.deleteQuestion(id)
+      setQuestions((prev) => prev.filter((item) => item.id !== id))
+      setSelectedQuestionIds((prev) => prev.filter((item) => item !== id))
       setQuestionToDelete(null)
       setImportStatusMessage({
         type: 'success',
-        text: 'Question was permanently deleted from the bank.',
+        text: 'Question removed from Question Bank.',
       })
       reloadData().catch(() => {})
     } catch (err: any) {
@@ -467,6 +631,7 @@ export const QuestionBankPage: React.FC = () => {
       await reloadData()
     } finally {
       setIsDeletingSingle(false)
+      singleDeleteInFlightRef.current = false
     }
   }
 
@@ -477,7 +642,7 @@ export const QuestionBankPage: React.FC = () => {
   }
 
   const handleSelectAllFiltered = () => {
-    const filteredIds = filteredQuestions.map((q) => q.id)
+    const filteredIds = pageQuestions.map((q) => q.id)
     const allSelected =
       filteredIds.length > 0 && filteredIds.every((id) => selectedQuestionIds.includes(id))
     if (allSelected) {
@@ -488,20 +653,22 @@ export const QuestionBankPage: React.FC = () => {
   }
 
   const handleConfirmBulkDelete = async () => {
-    if (selectedQuestionIds.length === 0) return
+    if (bulkDeleteInFlightRef.current || selectedQuestionIds.length === 0) return
+    bulkDeleteInFlightRef.current = true
     const count = selectedQuestionIds.length
     const targetIds = [...selectedQuestionIds]
     setIsBulkDeleting(true)
-    // Instant optimistic update
+    setImportStatusMessage({ type: 'success', text: `Deleting ${count} question${count > 1 ? 's' : ''}… Please wait.` })
+    // No optimistic deletion: bulk deletion may be refused to protect results.
     const idSet = new Set(targetIds)
-    setQuestions((prev) => prev.filter((q) => !idSet.has(q.id)))
-    setSelectedQuestionIds([])
     try {
       await questionBankService.deleteQuestions(targetIds)
+      setQuestions((prev) => prev.filter((q) => !idSet.has(q.id)))
+      setSelectedQuestionIds([])
       setIsBulkDeleteModalOpen(false)
       setImportStatusMessage({
         type: 'success',
-        text: `Successfully deleted ${count} question${count > 1 ? 's' : ''} permanently from the bank.`,
+        text: `Deleted ${count} question${count > 1 ? 's' : ''}.`,
       })
       reloadData().catch(() => {})
     } catch (err: any) {
@@ -513,17 +680,21 @@ export const QuestionBankPage: React.FC = () => {
       await reloadData()
     } finally {
       setIsBulkDeleting(false)
+      bulkDeleteInFlightRef.current = false
     }
   }
 
   const handleConfirmClearBank = async () => {
+    if (clearBankInFlightRef.current) return
+    clearBankInFlightRef.current = true
     const count = questions.length
     setIsClearingBank(true)
-    // Instant optimistic update
-    setQuestions([])
-    setSelectedQuestionIds([])
+    setImportStatusMessage({ type: 'success', text: 'Deleting all questions… Please wait.' })
+    // Keep the list intact unless the entire server-side transaction succeeds.
     try {
       await questionBankService.clearAllQuestions()
+      setQuestions([])
+      setSelectedQuestionIds([])
       setIsClearBankModalOpen(false)
       setImportStatusMessage({
         type: 'success',
@@ -539,17 +710,57 @@ export const QuestionBankPage: React.FC = () => {
       await reloadData()
     } finally {
       setIsClearingBank(false)
+      clearBankInFlightRef.current = false
     }
   }
 
-  const handleRestoreDefaultSeed = async () => {
-    await questionBankService.restoreDefaultSeedQuestions()
-    await reloadData()
-    setImportStatusMessage({
-      type: 'success',
-      text: 'Restored default specimen diagnostic questions successfully.',
-    })
+  const getGenericNodeDepth = (nodeId: string): number => {
+    let depth = 0
+    let current = genericTaxonomyNodes.find((node) => node.id === nodeId)
+    const seen = new Set<string>()
+
+    while (current?.parentId && !seen.has(current.id)) {
+      seen.add(current.id)
+      depth += 1
+      current = genericTaxonomyNodes.find((node) => node.id === current!.parentId)
+    }
+
+    return depth
   }
+
+  const getGenericDescendantIds = (nodeId: string): Set<string> => {
+    const result = new Set<string>([nodeId])
+    let changed = true
+
+    while (changed) {
+      changed = false
+      for (const node of genericTaxonomyNodes) {
+        if (node.parentId && result.has(node.parentId) && !result.has(node.id)) {
+          result.add(node.id)
+          changed = true
+        }
+      }
+    }
+
+    return result
+  }
+
+  const genericNodeFilterOptions = [...genericTaxonomyNodes].sort((a, b) => {
+    const depthDiff = getGenericNodeDepth(a.id) - getGenericNodeDepth(b.id)
+    if (depthDiff !== 0) return depthDiff
+    return a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)
+  })
+
+  // These options come from existing question records, including legacy questions.
+  // They do not modify or recreate any taxonomy relationships.
+  const lessonFilterOptions = useMemo(() => Array.from(new Set(
+    questions
+      .filter((q) => selectedCollection === 'all' || (q.collection || 'General Question Bank') === selectedCollection)
+      .filter((q) => selectedDomain === 'all' || q.domain === selectedDomain)
+      .filter((q) => selectedChapter === 'all' || q.chapter === selectedChapter)
+      .map((q) => String(q.lesson || '').trim())
+      .filter(Boolean)
+  )).sort((a, b) => a.localeCompare(b)), [questions, selectedCollection, selectedDomain, selectedChapter])
 
   // Filter questions
   const filteredQuestions = questions.filter((q) => {
@@ -558,15 +769,31 @@ export const QuestionBankPage: React.FC = () => {
       return false
     }
 
-    // Domain filter
+    // Choosing a taxonomy by itself must filter too, not only choosing a node.
+    // The loaded node list is scoped to the selected taxonomy.
+    if (selectedTaxonomyId && selectedTaxonomyNodeId === 'all') {
+      const taxonomyNodeIds = new Set(genericTaxonomyNodes.map((node) => String(node.id)))
+      if (!(q.taxonomyNodeIds || []).some((id) => taxonomyNodeIds.has(String(id)))) return false
+    }
+
+    // Generic taxonomy filter. Selecting a parent node includes questions
+    // assigned to that node or any descendant node.
+    if (selectedTaxonomyNodeId !== 'all') {
+      const matchingNodeIds = getGenericDescendantIds(selectedTaxonomyNodeId)
+      if (!(q.taxonomyNodeIds || []).some((nodeId) => matchingNodeIds.has(nodeId))) {
+        return false
+      }
+    }
+
+    // Legacy filters remain as a compatibility fallback while older questions
+    // are being migrated to generic taxonomy links.
     if (selectedDomain !== 'all' && q.domain !== selectedDomain) {
       return false
     }
-
-    // Chapter filter
     if (selectedChapter !== 'all' && q.chapter !== selectedChapter) {
       return false
     }
+    if (selectedLesson !== 'all' && q.lesson !== selectedLesson) return false
 
     // Difficulty filter
     if (selectedDifficulty !== 'all' && q.difficulty !== selectedDifficulty) {
@@ -580,14 +807,27 @@ export const QuestionBankPage: React.FC = () => {
 
     // Search filter
     if (searchTerm.trim()) {
-      const term = searchTerm.toLowerCase()
+      const term = searchTerm.trim().toLocaleLowerCase()
       const matchPrompt = q.prompt?.toLowerCase().includes(term)
       const matchDomain = q.domain?.toLowerCase().includes(term)
       const matchChapter = q.chapter?.toLowerCase().includes(term)
       const matchLesson = q.lesson?.toLowerCase().includes(term)
       const matchCollection = q.collection?.toLowerCase().includes(term)
       const matchExplanation = q.explanation?.toLowerCase().includes(term)
-      if (!matchPrompt && !matchDomain && !matchChapter && !matchLesson && !matchCollection && !matchExplanation) {
+      const matchGenericTaxonomy = (q.taxonomyNodeIds || []).some((nodeId) => {
+        const node = genericTaxonomyNodes.find((item) => item.id === nodeId)
+        return node?.name.toLowerCase().includes(term)
+      })
+
+      if (
+        !matchPrompt &&
+        !matchDomain &&
+        !matchChapter &&
+        !matchLesson &&
+        !matchCollection &&
+        !matchExplanation &&
+        !matchGenericTaxonomy
+      ) {
         return false
       }
     }
@@ -595,11 +835,47 @@ export const QuestionBankPage: React.FC = () => {
     return true
   })
 
+  // Pagination is client-side only; the source list and Supabase records are never altered.
+  const sortedQuestions = useMemo(() => {
+    const items = [...filteredQuestions]
+    const difficultyRank: Record<QuestionBankItem['difficulty'], number> = { easy: 0, medium: 1, hard: 2 }
+    switch (sortMode) {
+      case 'oldest':
+        items.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+        break
+      case 'prompt':
+        items.sort((a, b) => (a.prompt || '').localeCompare(b.prompt || ''))
+        break
+      case 'difficulty':
+        items.sort((a, b) => difficultyRank[a.difficulty] - difficultyRank[b.difficulty])
+        break
+      case 'collection':
+        items.sort((a, b) => (a.collection || '').localeCompare(b.collection || ''))
+        break
+      default:
+        items.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    }
+    return items
+  }, [filteredQuestions, sortMode])
+
+  useEffect(() => { setCurrentPage(1) }, [searchTerm, selectedCollection, selectedTaxonomyId,
+    selectedTaxonomyNodeId, selectedDomain, selectedChapter, selectedLesson, selectedDifficulty, selectedType,
+    sortMode, pageSize])
+
+  const totalPages = Math.max(1, Math.ceil(sortedQuestions.length / pageSize))
+  const safePage = Math.min(currentPage, totalPages)
+  const pageQuestions = sortedQuestions.slice((safePage - 1) * pageSize, safePage * pageSize)
+  const allPageSelected = pageQuestions.length > 0 && pageQuestions.every((q) => selectedQuestionIds.includes(q.id))
+
   // Clear all filters
   const handleClearFilters = () => {
     setSelectedCollection('all')
+    setSelectedTaxonomyNodeId('all')
     setSelectedDomain('all')
     setSelectedChapter('all')
+    setSelectedLesson('all')
+    setSelectedTaxonomyId('')
+    setGenericTaxonomyNodes([])
     setSelectedDifficulty('all')
     setSelectedType('all')
     setSearchTerm('')
@@ -611,65 +887,62 @@ export const QuestionBankPage: React.FC = () => {
   return (
     <AdminLayout
       title="Question Bank"
-      subtitle="Curriculum-aligned diagnostic question bank with collection gathering and JSON import/export"
+      subtitle="Find, organize, and reuse questions across your assessments."
       actions={
         <div className="flex flex-wrap items-center gap-2">
-          {/* Create Collection Button */}
-          <button
-            type="button"
-            onClick={() => {
-              setNewColName('')
-              setNewColDescription('')
-              setNewColTargetExam('EST 1 / SAT Math')
-              setNewColColorTag('blue')
-              setNewColOpenQuestionAfter(false)
-              setCreateColError(null)
-              setIsCreateCollectionModalOpen(true)
-            }}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-semibold hover:bg-indigo-100 transition shadow-xs"
-            title="Create a new collection without JSON"
-          >
-            <FolderPlus className="h-3.5 w-3.5 text-indigo-600" />
-            <span>New Collection</span>
+          <button type="button" onClick={() => void reloadData()} disabled={isLoadingQuestionBank}
+            className="inline-flex min-h-9 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+            <RefreshCw className={`h-4 w-4 ${isLoadingQuestionBank ? 'animate-spin' : ''}`} /> Refresh
           </button>
-
-          {/* Export JSON Button */}
-          <button
-            type="button"
-            onClick={handleExportJson}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 text-xs font-semibold hover:bg-slate-50 transition shadow-xs"
-            title="Export questions as JSON collection"
-          >
-            <Download className="h-3.5 w-3.5 text-slate-500" />
-            <span>Export JSON</span>
-          </button>
-
-          {/* Import JSON Collection Button */}
-          <button
-            type="button"
-            onClick={() => {
-              setIsImportModalOpen(true)
-              setImportStatusMessage(null)
-            }}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 text-blue-700 text-xs font-semibold hover:bg-blue-100 transition shadow-xs"
-          >
-            <Upload className="h-3.5 w-3.5 text-blue-600" />
-            <span>Import JSON Collection</span>
-          </button>
-
-          {/* New Question Button */}
-          <Link
-            to="/admin/questions/new"
-            style={{ backgroundColor: '#2563eb', color: '#ffffff' }}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition shadow-xs"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Add Question</span>
+          <details className="relative group">
+            <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 [&::-webkit-details-marker]:hidden">
+              <MoreHorizontal className="h-4 w-4" /> Library tools <ChevronDown className="h-3.5 w-3.5" />
+            </summary>
+            <div className="absolute right-0 top-full z-40 mt-2 flex w-56 flex-col gap-1 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+              <button type="button" onClick={() => {
+                setNewColName(''); setNewColParent(''); setNewColParentSearch(''); setNewColDescription(''); setNewColTargetExam('EST 1 / SAT Math');
+                setNewColOpenQuestionAfter(false); setCreateColError(null);
+                setIsCreateCollectionModalOpen(true)
+              }} className="flex items-center gap-2 rounded-xl px-3 py-2.5 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                <FolderPlus className="h-4 w-4 text-indigo-600" /> New collection
+              </button>
+              <button type="button" onClick={() => { setIsImportModalOpen(true); setImportStatusMessage(null) }}
+                className="flex items-center gap-2 rounded-xl px-3 py-2.5 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                <Upload className="h-4 w-4 text-blue-600" /> Import JSON
+              </button>
+              <button type="button" onClick={handleExportJson}
+                className="flex items-center gap-2 rounded-xl px-3 py-2.5 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                <Download className="h-4 w-4 text-slate-600" /> Export JSON
+              </button>
+            </div>
+          </details>
+          <Link to="/admin/questions/new" style={{ color: '#ffffff', backgroundColor: '#2563eb' }}
+            className="inline-flex min-h-9 items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-700">
+            <Plus className="h-4 w-4" /> Add question
           </Link>
         </div>
       }
     >
       <div className="space-y-5">
+        {isLoadingQuestionBank && (
+          <div className="p-4 rounded-2xl border border-blue-200 bg-blue-50 text-blue-800 flex items-center gap-2 text-xs font-medium">
+            <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+            <span>Getting your questions and collections ready…</span>
+          </div>
+        )}
+
+        {questionBankLoadError && !isLoadingQuestionBank && (
+          <div className="p-4 rounded-2xl border border-rose-200 bg-rose-50 text-rose-800 flex items-center justify-between gap-3 text-xs font-medium">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
+              <span>{questionBankLoadError}</span>
+            </div>
+            <button type="button" disabled={isLoadingQuestionBank} onClick={() => void reloadData()} className="px-3 py-1.5 rounded-lg bg-white border border-rose-200 text-rose-700 font-semibold hover:bg-rose-100 disabled:opacity-50 disabled:cursor-not-allowed">
+              {isLoadingQuestionBank ? 'Retrying…' : 'Retry'}
+            </button>
+          </div>
+        )}
+
         {/* Status notification banner */}
         {importStatusMessage && (
           <div
@@ -697,182 +970,128 @@ export const QuestionBankPage: React.FC = () => {
           </div>
         )}
 
-        {/* Question Bank Metrics Overview */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="bg-white p-4 rounded-2xl border border-slate-200">
-            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              Total Questions
-            </span>
-            <div className="mt-1 flex items-baseline gap-2">
-              <span className="text-xl font-bold text-slate-900">{questions.length}</span>
-              <span className="text-xs text-slate-400">in general bank</span>
-            </div>
-          </div>
-
-          <div className="bg-white p-4 rounded-2xl border border-slate-200">
-            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              Collections
-            </span>
-            <div className="mt-1 flex items-baseline gap-2">
-              <span className="text-xl font-bold text-blue-600">{collections.length}</span>
-              <span className="text-xs text-slate-400">gathered sets</span>
-            </div>
-          </div>
-
-          <div className="bg-white p-4 rounded-2xl border border-slate-200">
-            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              Curriculum Domains
-            </span>
-            <div className="mt-1 flex items-baseline gap-2">
-              <span className="text-xl font-bold text-indigo-600">
-                {new Set(questions.map((q) => q.domain)).size}
-              </span>
-              <span className="text-xs text-slate-400">represented</span>
-            </div>
-          </div>
-
-          <div className="bg-white p-4 rounded-2xl border border-slate-200">
-            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              Calculator Allowed
-            </span>
-            <div className="mt-1 flex items-baseline gap-2">
-              <span className="text-xl font-bold text-emerald-600">
-                {questions.filter((q) => q.calculatorAllowed).length}
-              </span>
-              <span className="text-xs text-slate-400">of {questions.length}</span>
-            </div>
-          </div>
+        {/* Reusable library metrics based on the loaded question list. */}
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <LibraryMetric icon={BookOpen} label="Questions" value={questions.length} hint="Questions available to use" />
+          <LibraryMetric icon={Folder} label="Collections" value={collections.length} hint="Question groups" />
+          <LibraryMetric icon={Layers} label="Curriculum topics" value={new Set(questions.flatMap((q) => q.taxonomyNodeIds || [])).size} hint="Topics linked to questions" />
+          <LibraryMetric icon={Calculator} label="Calculator questions" value={questions.filter((q) => q.calculatorAllowed).length} hint={`Of ${questions.length} questions`} />
         </div>
 
-        {/* Collections Tab Filter Bar */}
-        <div className="bg-white p-3 rounded-2xl border border-slate-200 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-              <Folder className="h-3.5 w-3.5 text-blue-600" />
-              <span>Question Collections</span>
-            </span>
-            <span className="text-[11px] text-slate-400">
-              Showing {filteredQuestions.length} of {questions.length} total questions
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
-            <button
-              type="button"
-              onClick={() => setSelectedCollection('all')}
-              className={`px-3 py-1.5 rounded-xl font-medium whitespace-nowrap transition ${
-                selectedCollection === 'all'
-                  ? 'bg-blue-600 text-white shadow-xs font-semibold'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              All Questions ({questions.length})
-            </button>
-
-            {collections.map((col) => (
-              <button
-                key={col.name}
-                type="button"
-                onClick={() => setSelectedCollection(col.name)}
-                className={`px-3 py-1.5 rounded-xl font-medium whitespace-nowrap transition flex items-center gap-1.5 ${
-                  selectedCollection === col.name
-                    ? 'bg-blue-600 text-white shadow-xs font-semibold'
-                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                }`}
-              >
-                <span>{col.name}</span>
-                <span
-                  className={`text-[10px] px-1.5 py-0.2 rounded-full ${
-                    selectedCollection === col.name
-                      ? 'bg-blue-700 text-white'
-                      : 'bg-slate-200 text-slate-700'
-                  }`}
-                >
-                  {col.questionCount}
-                </span>
-              </button>
-            ))}
-
-            {/* Quick Add Collection Pill */}
-            <button
-              type="button"
-              onClick={() => {
-                setNewColName('')
-                setNewColDescription('')
-                setNewColTargetExam('EST 1 / SAT Math')
-                setNewColColorTag('blue')
-                setNewColOpenQuestionAfter(false)
-                setCreateColError(null)
-                setIsCreateCollectionModalOpen(true)
-              }}
-              className="px-2.5 py-1.5 rounded-xl font-medium whitespace-nowrap transition flex items-center gap-1 text-indigo-700 bg-indigo-50/80 hover:bg-indigo-100 border border-dashed border-indigo-300 shadow-2xs shrink-0"
-              title="Add a new question collection"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>Add Collection</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Selected Collection Spotlight / Management Bar */}
-        {selectedCollection !== 'all' && (
-          <div className="bg-gradient-to-r from-blue-50/70 via-indigo-50/40 to-slate-50 p-4 rounded-2xl border border-blue-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-            <div className="space-y-1">
-              <div className="flex items-center flex-wrap gap-2">
-                <Folder className="h-4 w-4 text-blue-600 shrink-0" />
-                <h3 className="text-sm font-bold text-slate-800">{selectedCollection}</h3>
-                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">
-                  {filteredQuestions.length} {filteredQuestions.length === 1 ? 'Question' : 'Questions'}
-                </span>
-                {collections.find((c) => c.name === selectedCollection)?.targetExam && (
-                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">
-                    {collections.find((c) => c.name === selectedCollection)?.targetExam}
-                  </span>
-                )}
+        {/* Collection workspace: follows the product's slate/teal visual language. */}
+        <section className="overflow-hidden rounded-[22px] border border-slate-200/90 bg-white shadow-[0_8px_30px_-18px_rgba(18,51,63,0.22)]" aria-label="Question collections">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-5 sm:px-6">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#e9f3f2] text-[#205a63]"><FolderOpen className="h-5 w-5"/></div>
+              <div className="min-w-0">
+                <h2 className="text-base font-bold tracking-tight text-[#183446]">Your collections</h2>
+                <p className="mt-0.5 text-xs text-slate-500">Keep questions organized in folders and subfolders.</p>
               </div>
-              {collections.find((c) => c.name === selectedCollection)?.description ? (
-                <p className="text-xs text-slate-600 max-w-2xl">
-                  {collections.find((c) => c.name === selectedCollection)?.description}
-                </p>
-              ) : (
-                <p className="text-xs text-slate-400 italic">No description provided for this collection.</p>
-              )}
             </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <Link
-                to={`/admin/questions/new?collection=${encodeURIComponent(selectedCollection)}`}
-                style={{ backgroundColor: '#2563eb', color: '#ffffff' }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition shadow-xs"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>Add Question</span>
-              </Link>
-              <button
-                type="button"
-                onClick={() => {
-                  const colObj = collections.find((c) => c.name === selectedCollection) || {
-                    name: selectedCollection,
-                    questionCount: filteredQuestions.length,
-                  }
-                  handleOpenEditCollection(colObj)
-                }}
-                className="p-2 text-slate-600 hover:text-blue-600 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition"
-                title="Edit collection name & details"
-              >
-                <Edit3 className="h-3.5 w-3.5" />
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => setShowCollectionsList(v => !v)} aria-expanded={showCollectionsList} aria-controls="question-bank-collections-list"
+                className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 text-sm font-medium text-[#284454] transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#27737a]">
+                {showCollectionsList ? <ChevronUp className="h-4 w-4"/> : <ChevronDown className="h-4 w-4"/>}
+                {showCollectionsList ? 'Hide folders' : 'Show folders'}
               </button>
-              {selectedCollection !== 'General Question Bank' && (
-                <button
-                  type="button"
-                  onClick={() => handleOpenDeleteCollection(selectedCollection, filteredQuestions.length)}
-                  className="p-2 text-slate-600 hover:text-rose-600 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition"
-                  title="Delete collection"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              )}
+              <button type="button" onClick={() => {
+                setNewColName(''); setNewColParent(''); setNewColParentSearch(''); setNewColDescription(''); setNewColTargetExam('EST 1 / SAT Math');
+                setNewColOpenQuestionAfter(false); setCreateColError(null); setIsCreateCollectionModalOpen(true)
+              }} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-[#205665] px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-[#174552] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#27737a]">
+                <FolderPlus className="h-4 w-4"/> New collection
+              </button>
             </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-100 bg-[#f8fafb] px-5 py-3 sm:px-6" aria-label="Current collection path">
+            <button type="button" onClick={() => { setSelectedCollection('all'); setCurrentPage(1) }}
+              className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition ${selectedCollection === 'all' ? 'bg-[#dceeed] text-[#205665]' : 'text-slate-600 hover:bg-slate-100'}`}>
+              All questions <span className="ml-1 text-xs opacity-70">{questions.length}</span>
+            </button>
+            {selectedCollectionPath.map((name, index) => (
+              <React.Fragment key={name}>
+                <ChevronDown className="h-3.5 w-3.5 -rotate-90 text-slate-400" aria-hidden="true"/>
+                <button type="button" onClick={() => { setSelectedCollection(name); setCurrentPage(1) }} aria-current={index === selectedCollectionPath.length - 1 ? 'page' : undefined}
+                  className={`max-w-[180px] truncate rounded-lg px-2 py-1.5 text-sm font-medium transition ${name === selectedCollection ? 'bg-[#dceeed] text-[#205665]' : 'text-slate-600 hover:bg-slate-100'}`}>
+                  {name}
+                </button>
+              </React.Fragment>
+            ))}
+          </div>
+          {showCollectionsList && (
+            <div id="question-bank-collections-list" className="px-5 py-4 sm:px-6 sm:py-5">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <label className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl border border-slate-200 bg-[#fbfcfd] px-3.5 py-2.5 transition focus-within:border-[#41858b] focus-within:ring-2 focus-within:ring-[#dceeed] sm:max-w-sm">
+                  <Search className="h-4 w-4 shrink-0 text-slate-400"/>
+                  <span className="sr-only">Find a collection</span>
+                  <input type="search" value={collectionSearch} onChange={e => setCollectionSearch(e.target.value)} placeholder="Find a collection…"
+                    aria-label="Find a collection" className="min-w-0 w-full bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400"/>
+                </label>
+                <span className="text-xs font-medium text-slate-500">{collections.length} {collections.length === 1 ? 'collection' : 'collections'}</span>
+              </div>
+              {collections.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 p-8 text-center">
+                  <FolderPlus className="mx-auto mb-2 h-7 w-7 text-[#6a969b]"/>
+                  <p className="text-sm font-medium text-slate-700">No collections yet</p>
+                  <p className="mt-1 text-xs text-slate-500">Create a collection to organize your questions.</p>
+                </div>
+              ) : visibleCollectionTree.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 p-7 text-center text-sm text-slate-500">No collections match your search.</div>
+              ) : (
+                <div className="overflow-hidden rounded-xl border border-slate-200/90 bg-white" role="tree" aria-label="Collection hierarchy">
+                  {visibleCollectionTree.map(({ collection, depth }) => {
+                    const hasChildren = collections.some(c => c.parentName === collection.name)
+                    const collapsed = collapsedCollections.includes(collection.name)
+                    const active = selectedCollection === collection.name
+                    return (
+                      <div key={collection.name} role="treeitem" aria-level={depth + 1} aria-selected={active} aria-expanded={hasChildren ? !collapsed : undefined}
+                        className={`group flex min-h-[56px] flex-wrap items-center gap-2 border-b border-slate-100 px-3 py-2 last:border-b-0 sm:flex-nowrap ${active ? 'bg-[#eff7f5]' : 'hover:bg-[#fafcfc]'}`}>
+                        <div className="flex min-w-0 flex-1 items-center gap-1" style={{ paddingLeft: `${Math.min(depth, 7) * 19}px` }}>
+                          {hasChildren ? (
+                            <button type="button" onClick={() => setCollapsedCollections(prev => prev.includes(collection.name) ? prev.filter(n => n !== collection.name) : [...prev, collection.name])}
+                              aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${collection.name}`} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-[#27737a]">
+                              {collapsed && !collectionSearch.trim() ? <ChevronDown className="h-4 w-4 -rotate-90"/> : <ChevronDown className="h-4 w-4"/>}
+                            </button>
+                          ) : <span className="w-8 shrink-0"/>}
+                          <button type="button" onClick={() => { setSelectedCollection(collection.name); setCurrentPage(1) }}
+                            className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-1 py-1.5 text-left focus-visible:outline-2 focus-visible:outline-[#27737a]"
+                            aria-label={`View questions in ${collection.name}`}>
+                            {hasChildren && !collapsed ? <FolderOpen className={`h-[18px] w-[18px] shrink-0 ${active ? 'text-[#205665]' : 'text-[#6d929a]'}`}/> : <Folder className={`h-[18px] w-[18px] shrink-0 ${active ? 'text-[#205665]' : 'text-[#78939f]'}`}/>}
+                            <span className={`truncate text-sm ${active ? 'font-bold text-[#173f49]' : 'font-medium text-[#294251]'}`}>{collection.name}</span>
+                            <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">{collection.questionCount}</span>
+                            {active && <span className="hidden text-[11px] font-semibold text-[#28737b] sm:inline">Selected</span>}
+                          </button>
+                        </div>
+                        <div className="ml-auto flex shrink-0 items-center gap-1 pl-9 sm:pl-0">
+                          <button type="button" onClick={() => { setNewColName(''); setNewColParent(collection.name); setNewColParentSearch(''); setNewColDescription(''); setCreateColError(null); setIsCreateCollectionModalOpen(true) }}
+                            aria-label={`Add subcollection to ${collection.name}`} title="Add subcollection" className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-[#276672] transition hover:bg-[#e4f1f0] focus-visible:outline-2 focus-visible:outline-[#27737a]">
+                            <FolderPlus className="h-4 w-4"/><span className="hidden lg:inline">Add subfolder</span>
+                          </button>
+                          <button type="button" onClick={() => handleOpenEditCollection(collection)} aria-label={`Edit ${collection.name}`} title="Rename or move collection"
+                            className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-[#205665] focus-visible:outline-2 focus-visible:outline-[#27737a]"><Edit3 className="h-4 w-4"/></button>
+                          {collection.name !== 'General Question Bank' && <button type="button" onClick={() => handleOpenDeleteCollection(collection.name, collection.questionCount)}
+                            aria-label={`Delete collection ${collection.name}`} title="Delete collection (keep questions)"
+                            className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-700 focus-visible:outline-2 focus-visible:outline-[#27737a]"><Trash2 className="h-4 w-4"/></button>}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+              <p className="mt-3 text-xs text-slate-500">Question counts are for each folder only. Deleting a collection keeps its questions.</p>
+            </div>
+          )}
+        </section>
+
+        {selectedCollection !== 'all' && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#d5e8e5] bg-[#f4faf8] px-4 py-3">
+            <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-[#234450]">
+              <FolderOpen className="h-4 w-4 text-[#35737a]"/><span className="truncate">{selectedCollectionPath.join(' / ')}</span>
+              <span className="rounded-full bg-white px-2 py-1 text-xs font-medium text-slate-500">{filteredQuestions.length} questions</span>
+            </div>
+            <Link to={`/admin/questions/new?collection=${encodeURIComponent(selectedCollection)}`}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#205665] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[#174552]">
+              <Plus className="h-4 w-4"/> Add question here
+            </Link>
           </div>
         )}
 
@@ -884,7 +1103,8 @@ export const QuestionBankPage: React.FC = () => {
               <Search className="h-4 w-4 text-slate-400 shrink-0" />
               <input
                 type="text"
-                placeholder="Search stem, equation, domain, chapter, lesson..."
+                aria-label="Search question bank"
+                placeholder="Search question text, lesson, or keyword…"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="w-full text-xs text-slate-800 focus:outline-hidden bg-transparent"
@@ -893,6 +1113,7 @@ export const QuestionBankPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setSearchTerm('')}
+                  aria-label="Clear question search"
                   className="text-slate-400 hover:text-slate-600"
                 >
                   <X className="h-3.5 w-3.5" />
@@ -900,39 +1121,113 @@ export const QuestionBankPage: React.FC = () => {
               )}
             </div>
 
-            {/* Domain Dropdown Filter */}
-            <div className="w-52">
-              <select
-                value={selectedDomain}
-                onChange={(e) => {
-                  setSelectedDomain(e.target.value)
-                  setSelectedChapter('all')
-                }}
-                className="w-full text-xs border border-slate-200 rounded-xl px-2.5 py-2 bg-slate-50 focus:border-blue-500 focus:outline-hidden focus:bg-white"
-              >
-                <option value="all">All Domains (Units)</option>
-                {Object.keys(taxonomy).map((d) => (
-                  <option key={d} value={d}>
-                    {d}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {/* Generic Taxonomy Filter */}
+            {genericTaxonomies.length > 0 && (
+              <>
+                <div className="w-52">
+                  <select
+                    value={selectedTaxonomyId}
+                    onChange={async (e) => {
+                      const taxonomyId = e.target.value
+                      setSelectedTaxonomyId(taxonomyId)
+                      setSelectedTaxonomyNodeId('all')
 
-            {/* Chapter Dropdown Filter */}
-            {selectedDomain !== 'all' && activeChaptersForFilter.length > 0 && (
-              <div className="w-48">
+                      if (taxonomyId) {
+                        try {
+                          const nodes = await questionBankService.fetchGenericTaxonomyNodes(taxonomyId)
+                          setGenericTaxonomyNodes(nodes)
+                        } catch (error) {
+                          console.warn('Failed to load taxonomy nodes:', error)
+                          setGenericTaxonomyNodes([])
+                        }
+                      } else {
+                        setGenericTaxonomyNodes([])
+                      }
+                    }}
+                    className="w-full text-xs border border-slate-200 rounded-xl px-2.5 py-2 bg-slate-50 focus:border-blue-500 focus:outline-hidden focus:bg-white"
+                  >
+                    <option value="">All Taxonomies</option>
+                    {genericTaxonomies.map((taxonomyItem) => (
+                      <option key={taxonomyItem.id} value={taxonomyItem.id}>
+                        {taxonomyItem.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {selectedTaxonomyId && genericNodeFilterOptions.length > 0 && (
+                  <div className="w-64">
+                    <select
+                      value={selectedTaxonomyNodeId}
+                      onChange={(e) => setSelectedTaxonomyNodeId(e.target.value)}
+                      className="w-full text-xs border border-slate-200 rounded-xl px-2.5 py-2 bg-slate-50 focus:border-blue-500 focus:outline-hidden focus:bg-white"
+                    >
+                      <option value="all">All Taxonomy Nodes</option>
+                      {genericNodeFilterOptions.map((node) => (
+                        <option key={node.id} value={node.id}>
+                          {'— '.repeat(getGenericNodeDepth(node.id))}
+                          {node.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Legacy Domain Dropdown (compatibility during migration) */}
+            {genericTaxonomies.length === 0 && (
+              <div className="w-52">
                 <select
-                  value={selectedChapter}
-                  onChange={(e) => setSelectedChapter(e.target.value)}
+                  value={selectedDomain}
+                  onChange={(e) => {
+                    setSelectedDomain(e.target.value)
+                    setSelectedChapter('all')
+                    setSelectedLesson('all')
+                  }}
                   className="w-full text-xs border border-slate-200 rounded-xl px-2.5 py-2 bg-slate-50 focus:border-blue-500 focus:outline-hidden focus:bg-white"
                 >
-                  <option value="all">All Chapters</option>
-                  {activeChaptersForFilter.map((c: any) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
+                  <option value="all">All Domains (Units)</option>
+                  {Object.keys(taxonomy).map((d) => (
+                    <option key={d} value={d}>
+                      {d}
                     </option>
                   ))}
+                </select>
+              </div>
+            )}
+
+            {/* Legacy Chapter Dropdown (compatibility during migration) */}
+            {genericTaxonomies.length === 0 &&
+              selectedDomain !== 'all' &&
+              activeChaptersForFilter.length > 0 && (
+                <div className="w-48">
+                  <select
+                    value={selectedChapter}
+                    onChange={(e) => { setSelectedChapter(e.target.value); setSelectedLesson('all') }}
+                    className="w-full text-xs border border-slate-200 rounded-xl px-2.5 py-2 bg-slate-50 focus:border-blue-500 focus:outline-hidden focus:bg-white"
+                  >
+                    <option value="all">All Chapters</option>
+                    {activeChaptersForFilter.map((c: any) => (
+                      <option key={c.name} value={c.name}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+            {/* Lesson filter works with both saved generic and legacy classifications. */}
+            {lessonFilterOptions.length > 0 && (
+              <div className="w-48">
+                <select
+                  aria-label="Filter by lesson"
+                  value={selectedLesson}
+                  onChange={(e) => setSelectedLesson(e.target.value)}
+                  className="w-full text-xs border border-slate-200 rounded-xl px-2.5 py-2 bg-slate-50 focus:border-blue-500 focus:outline-hidden focus:bg-white"
+                >
+                  <option value="all">All Lessons</option>
+                  {lessonFilterOptions.map((name) => <option key={name} value={name}>{name}</option>)}
                 </select>
               </div>
             )}
@@ -966,8 +1261,11 @@ export const QuestionBankPage: React.FC = () => {
             </div>
 
             {/* Clear filters */}
-            {(selectedDomain !== 'all' ||
+            {(selectedTaxonomyId !== '' ||
+              selectedTaxonomyNodeId !== 'all' ||
+              selectedDomain !== 'all' ||
               selectedChapter !== 'all' ||
+              selectedLesson !== 'all' ||
               selectedDifficulty !== 'all' ||
               selectedType !== 'all' ||
               searchTerm ||
@@ -982,6 +1280,43 @@ export const QuestionBankPage: React.FC = () => {
               </button>
             )}
           </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
+            <p role="status" aria-live="polite" className="text-xs font-medium text-slate-600">
+              Showing {filteredQuestions.length} of {questions.length} questions
+              {searchTerm.trim() ? ` matching “${searchTerm.trim()}”` : ''}
+            </p>
+            {(searchTerm || selectedCollection !== 'all' || selectedTaxonomyId || selectedTaxonomyNodeId !== 'all' || selectedDomain !== 'all' || selectedChapter !== 'all' || selectedLesson !== 'all' || selectedDifficulty !== 'all' || selectedType !== 'all') && (
+              <button type="button" onClick={handleClearFilters} className="text-xs font-semibold text-blue-700 hover:text-blue-900 underline underline-offset-2">
+                Clear all filters
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex min-w-[170px] flex-1 flex-col gap-1 text-[11px] font-semibold text-slate-600 sm:flex-none">
+              Sort questions
+              <select value={sortMode} onChange={(e) => setSortMode(e.target.value as typeof sortMode)}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800">
+                <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
+                <option value="prompt">Question text A–Z</option><option value="difficulty">Difficulty: easy to hard</option>
+                <option value="collection">Collection A–Z</option>
+              </select>
+            </label>
+            <label className="flex min-w-[140px] flex-col gap-1 text-[11px] font-semibold text-slate-600">
+              Questions per page
+              <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-800">
+                <option value={12}>12 per page</option><option value={24}>24 per page</option><option value={48}>48 per page</option>
+              </select>
+            </label>
+            <button type="button" onClick={() => setShowAdvancedFilters((value) => !value)}
+              aria-expanded={showAdvancedFilters}
+              className="inline-flex min-h-9 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+              <Filter className="h-3.5 w-3.5" /> {showAdvancedFilters ? 'Hide tips' : 'Search tips'}
+            </button>
+          </div>
+          {showAdvancedFilters && <p className="rounded-xl bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
+            Search looks at question text, explanations, collections, and curriculum names. Use the filters above to narrow results. Selecting questions applies only to the current page, while your selection is retained when changing pages.
+          </p>}
         </div>
 
         {/* Bulk Action & Catalog Management Bar */}
@@ -994,19 +1329,18 @@ export const QuestionBankPage: React.FC = () => {
                 className="flex items-center gap-2 text-xs font-semibold text-slate-700 hover:text-blue-600 transition"
                 title="Select or deselect all visible questions"
               >
-                {filteredQuestions.length > 0 &&
-                filteredQuestions.every((q) => selectedQuestionIds.includes(q.id)) ? (
+                {allPageSelected ? (
                   <CheckSquare className="h-4 w-4 text-blue-600" />
                 ) : (
                   <Square className="h-4 w-4 text-slate-400" />
                 )}
-                <span>Select All Visible ({filteredQuestions.length})</span>
+                <span>{allPageSelected ? 'Deselect this page' : 'Select this page'} ({pageQuestions.length})</span>
               </button>
 
               <span className="text-slate-200">|</span>
 
               <span className="text-xs text-slate-500">
-                Showing {filteredQuestions.length} of {questions.length} question{questions.length === 1 ? '' : 's'}
+                {filteredQuestions.length} matching · {pageQuestions.length} on this page
               </span>
             </div>
 
@@ -1014,7 +1348,7 @@ export const QuestionBankPage: React.FC = () => {
               {selectedQuestionIds.length > 0 && (
                 <>
                   <span className="text-xs font-semibold px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg border border-blue-100">
-                    {selectedQuestionIds.length} selected
+                    {selectedQuestionIds.length} selected across pages
                   </span>
                   <button
                     type="button"
@@ -1035,15 +1369,18 @@ export const QuestionBankPage: React.FC = () => {
               )}
 
               {selectedQuestionIds.length === 0 && (
-                <button
-                  type="button"
-                  onClick={() => setIsClearBankModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 text-slate-500 hover:text-rose-600 hover:border-rose-200 hover:bg-rose-50 text-xs font-semibold transition"
-                  title="Permanently wipe all questions in the bank"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  <span>Clear All Questions</span>
-                </button>
+                <details className="relative">
+                  <summary className="cursor-pointer list-none rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50 [&::-webkit-details-marker]:hidden">
+                    Advanced actions <ChevronDown className="ml-1 inline h-3.5 w-3.5" />
+                  </summary>
+                  <div className="absolute right-0 top-full z-30 mt-2 w-60 rounded-2xl border border-rose-200 bg-white p-3 shadow-xl">
+                    <p className="mb-2 text-[11px] leading-4 text-slate-600">Danger zone — removing the entire bank cannot be undone. Published or attempted assessment protections still apply.</p>
+                    <button type="button" onClick={() => setIsClearBankModalOpen(true)}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-100">
+                      <Trash2 className="h-3.5 w-3.5" /> Clear entire question bank
+                    </button>
+                  </div>
+                </details>
               )}
             </div>
           </div>
@@ -1061,14 +1398,14 @@ export const QuestionBankPage: React.FC = () => {
                   {questions.length === 0
                     ? 'Question Bank is Empty'
                     : selectedCollection !== 'all'
-                    ? `No questions in "${selectedCollection}" yet`
+                    ? `No matching questions in "${selectedCollection}"`
                     : 'No questions found'}
                 </h4>
                 <p className="text-xs text-slate-500 leading-relaxed">
                   {questions.length === 0
-                    ? 'All questions have been permanently deleted from your repository. You can author a new question, import a collection from JSON, or restore the default specimen diagnostic questions.'
+                    ? 'No questions are available yet. Add a question or import your own question collection to get started.'
                     : selectedCollection !== 'all'
-                    ? `This collection is empty. You can author a new question directly into it, or import existing questions.`
+                    ? `Try resetting the filters, or add a question to this collection.`
                     : `No questions match your current search and filter criteria. You can create a new question or import collections.`}
                 </p>
               </div>
@@ -1091,14 +1428,6 @@ export const QuestionBankPage: React.FC = () => {
                       <Upload className="h-3.5 w-3.5" />
                       <span>Import JSON Collection</span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={handleRestoreDefaultSeed}
-                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-semibold transition"
-                    >
-                      <RotateCcw className="h-3.5 w-3.5 text-slate-500" />
-                      <span>Restore Sample Questions</span>
-                    </button>
                   </>
                 ) : selectedCollection !== 'all' ? (
                   <>
@@ -1119,6 +1448,10 @@ export const QuestionBankPage: React.FC = () => {
                       className="px-3.5 py-2 rounded-xl bg-blue-50 border border-blue-200 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition shadow-xs"
                     >
                       Import JSON into Collection
+                    </button>
+                    <button type="button" onClick={handleClearFilters}
+                      className="rounded-xl border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                      Reset filters
                     </button>
                   </>
                 ) : (
@@ -1142,7 +1475,7 @@ export const QuestionBankPage: React.FC = () => {
               </div>
             </div>
           ) : (
-            filteredQuestions.map((q, idx) => {
+            pageQuestions.map((q) => {
               const isExpanded = expandedQuestionId === q.id
               const isSelected = selectedQuestionIds.includes(q.id)
 
@@ -1156,7 +1489,7 @@ export const QuestionBankPage: React.FC = () => {
                   {/* Card Header & Problem Summary */}
                   <div className="p-4 sm:p-5 space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      {/* Selection Checkbox & Categorization Breadcrumbs */}
+                      {/* Selection Checkbox & Generic Taxonomy Tags */}
                       <div className="flex flex-wrap items-center gap-2 text-[11px]">
                         <button
                           type="button"
@@ -1170,13 +1503,26 @@ export const QuestionBankPage: React.FC = () => {
                             <Square className="h-4 w-4 text-slate-300" />
                           )}
                         </button>
-                        <span className="font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-100">
-                          {q.domain}
-                        </span>
-                        <span className="text-slate-300">›</span>
-                        <span className="font-medium text-slate-600">{q.chapter}</span>
-                        <span className="text-slate-300">›</span>
-                        <span className="font-medium text-slate-500">{q.lesson}</span>
+
+                        {(q.taxonomyNodeIds || []).length > 0 ? (
+                          (q.taxonomyNodeIds || []).map((nodeId) => {
+                            const node = genericTaxonomyNodes.find((item) => item.id === nodeId)
+                            if (!node) return null
+                            return (
+                              <span
+                                key={node.id}
+                                className="font-medium text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100"
+                                title={node.description || node.name}
+                              >
+                                {node.name}
+                              </span>
+                            )
+                          })
+                        ) : (
+                          <span className="font-medium text-slate-600 bg-slate-50 px-2 py-0.5 rounded-md border border-slate-200">
+                            {q.domain}
+                          </span>
+                        )}
                       </div>
 
                       {/* Collection & Status Badges */}
@@ -1435,6 +1781,8 @@ export const QuestionBankPage: React.FC = () => {
             })
           )}
         </div>
+        <LibraryPagination page={safePage} totalPages={totalPages} totalItems={sortedQuestions.length}
+          pageSize={pageSize} onPageChange={setCurrentPage} />
       </div>
 
       {/* JSON Import Modal */}
@@ -1667,17 +2015,17 @@ export const QuestionBankPage: React.FC = () => {
         <div
           role="dialog"
           aria-modal="true"
-          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center overflow-y-auto p-3 sm:p-5"
           onClick={() => setIsCreateCollectionModalOpen(false)}
         >
           <div
-            className="relative max-w-lg w-full bg-white rounded-3xl p-6 shadow-2xl border border-slate-200 space-y-5"
+            className="relative flex w-full max-w-xl max-h-[calc(100dvh-1.5rem)] sm:max-h-[calc(100dvh-2.5rem)] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-6">
               <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-teal-50 text-teal-700">
                   <FolderPlus className="h-5 w-5" />
                 </div>
                 <div>
@@ -1690,12 +2038,15 @@ export const QuestionBankPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsCreateCollectionModalOpen(false)}
-                className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition"
+                disabled={isSavingCollection}
+                aria-label="Close new collection dialog" className="shrink-0 rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
+            <form onSubmit={handleCreateCollection} className="flex min-h-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-5 py-4 sm:px-6">
             {/* Error banner */}
             {createColError && (
               <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center gap-2">
@@ -1704,7 +2055,6 @@ export const QuestionBankPage: React.FC = () => {
               </div>
             )}
 
-            <form onSubmit={handleCreateCollection} className="space-y-4">
               {/* Collection Name */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700">
@@ -1721,6 +2071,56 @@ export const QuestionBankPage: React.FC = () => {
                 />
               </div>
 
+              {/* A teacher chooses a destination, not a database relationship. */}
+              <fieldset className="space-y-2" aria-describedby="new-collection-location-help">
+                <legend className="text-sm font-semibold text-slate-800">Where should this collection go?</legend>
+                <p id="new-collection-location-help" className="text-xs text-slate-500">Choose a location. You can move the collection later.</p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <label className={`flex cursor-pointer items-center gap-2 rounded-xl border p-3 transition ${!newColParent ? 'border-indigo-400 bg-indigo-50 ring-1 ring-indigo-200' : 'border-slate-200 hover:bg-slate-50'}`}>
+                    <input type="radio" name="new-collection-location" value="root" checked={!newColParent}
+                      onChange={() => setNewColParent('')} className="accent-indigo-600" />
+                    <Folder className="h-4 w-4 shrink-0 text-indigo-600" />
+                    <span className="text-xs font-semibold text-slate-800">Top-level collection</span>
+                  </label>
+                  <label className={`flex cursor-pointer items-center gap-2 rounded-xl border p-3 transition ${newColParent ? 'border-indigo-400 bg-indigo-50 ring-1 ring-indigo-200' : 'border-slate-200 hover:bg-slate-50'}`}>
+                    <input type="radio" name="new-collection-location" value="nested" checked={Boolean(newColParent)}
+                      disabled={collectionTree.length === 0}
+                      onChange={() => setNewColParent(collectionTree[0]?.collection.name || '')} className="accent-indigo-600" />
+                    <FolderPlus className="h-4 w-4 shrink-0 text-indigo-600" />
+                    <span className="text-xs font-semibold text-slate-800">Inside a collection</span>
+                  </label>
+                </div>
+                {collectionTree.length > 0 && (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                    <label htmlFor="new-collection-folder-search" className="mb-1.5 block text-xs font-semibold text-slate-700">Choose an existing folder</label>
+                    <div className="relative">
+                      <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                      <input id="new-collection-folder-search" type="search" value={newColParentSearch}
+                        onChange={e => setNewColParentSearch(e.target.value)} placeholder="Find a parent collection…"
+                        className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-hidden focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" />
+                    </div>
+                    <div role="group" aria-label="Available parent collections" className="mt-2 max-h-40 space-y-1 overflow-y-auto">
+                      {collectionTree.filter(({collection}) => collection.name.toLowerCase().includes(newColParentSearch.trim().toLowerCase())).map(({collection,depth}) => (
+                        <label key={collection.name} className={`flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-xs transition ${newColParent === collection.name ? 'bg-indigo-100 text-indigo-900' : 'text-slate-700 hover:bg-white'}`}>
+                          <input type="radio" name="new-collection-folder" checked={newColParent === collection.name}
+                            onChange={() => setNewColParent(collection.name)} className="accent-indigo-600" />
+                          <span aria-hidden="true" style={{width: Math.min(depth, 6) * 12}} className="shrink-0" />
+                          <Folder className="h-4 w-4 shrink-0 text-indigo-500" />
+                          <span className="min-w-0 flex-1 truncate" title={collection.name}>{collection.name}</span>
+                          {newColParent === collection.name && <Check className="h-4 w-4 text-indigo-600" aria-hidden="true" />}
+                        </label>
+                      ))}
+                      {!collectionTree.some(({collection}) => collection.name.toLowerCase().includes(newColParentSearch.trim().toLowerCase())) && (
+                        <p className="px-2 py-3 text-xs text-slate-500">No matching collections. Try another name.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                <div role="status" className="flex items-start gap-2 rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
+                  <FolderOpen className="h-4 w-4 shrink-0 text-indigo-500" aria-hidden="true" />
+                  <span><strong className="text-slate-800">Location:</strong> Question Bank{newColParent ? ` / ${(() => { const names = [newColParent]; const seen = new Set(names); let current = collections.find(c => c.name === newColParent); while (current?.parentName && !seen.has(current.parentName)) { names.unshift(current.parentName); seen.add(current.parentName); current = collections.find(c => c.name === current?.parentName) } return names.join(' / ') })()}` : ' / Top level'}{newColName.trim() ? ` / ${newColName.trim()}` : ' / New collection'}</span>
+                </div>
+              </fieldset>
               {/* Target Exam */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700">
@@ -1748,36 +2148,9 @@ export const QuestionBankPage: React.FC = () => {
                   rows={2}
                   value={newColDescription}
                   onChange={(e) => setNewColDescription(e.target.value)}
-                  placeholder="e.g. Specially curated diagnostic collection testing circle theorems, sector area, and arc lengths..."
+                  placeholder="e.g. Practice questions on circles, area, and arc length"
                   className="mt-1 w-full rounded-xl border border-slate-200 p-3 text-xs text-slate-800 placeholder-slate-400 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-hidden"
                 />
-              </div>
-
-              {/* Color Accent Tag */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  Color Accent Theme
-                </label>
-                <div className="flex items-center gap-2">
-                  {[
-                    { tag: 'blue', label: 'Blue', bg: 'bg-blue-500 ring-blue-300' },
-                    { tag: 'indigo', label: 'Indigo', bg: 'bg-indigo-500 ring-indigo-300' },
-                    { tag: 'emerald', label: 'Emerald', bg: 'bg-emerald-500 ring-emerald-300' },
-                    { tag: 'purple', label: 'Purple', bg: 'bg-purple-500 ring-purple-300' },
-                    { tag: 'amber', label: 'Amber', bg: 'bg-amber-500 ring-amber-300' },
-                    { tag: 'rose', label: 'Rose', bg: 'bg-rose-500 ring-rose-300' },
-                  ].map((color) => (
-                    <button
-                      key={color.tag}
-                      type="button"
-                      onClick={() => setNewColColorTag(color.tag)}
-                      className={`w-6 h-6 rounded-full ${color.bg} transition ${
-                        newColColorTag === color.tag ? 'ring-3 ring-offset-2 scale-110' : 'opacity-70 hover:opacity-100'
-                      }`}
-                      title={color.label}
-                    />
-                  ))}
-                </div>
               </div>
 
               {/* Checkbox: Open question creator after creation */}
@@ -1795,8 +2168,9 @@ export const QuestionBankPage: React.FC = () => {
                 </label>
               </div>
 
-              {/* Modal Actions */}
-              <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+              </div>
+              {/* Modal Actions: stays visible while the form body scrolls */}
+              <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-100 bg-white px-5 py-3 sm:px-6">
                 <button
                   type="button"
                   onClick={() => setIsCreateCollectionModalOpen(false)}
@@ -1806,11 +2180,12 @@ export const QuestionBankPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  style={{ backgroundColor: '#4f46e5', color: '#ffffff' }}
-                  className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition shadow-xs"
+                  disabled={isSavingCollection}
+                  style={{ backgroundColor: '#205665', color: '#ffffff' }}
+                  className="inline-flex items-center gap-1.5 rounded-xl px-5 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:opacity-90 disabled:opacity-60"
                 >
                   <FolderPlus className="h-4 w-4" />
-                  <span>Create Collection</span>
+                  <span>{isSavingCollection ? 'Saving Collection...' : 'Create Collection'}</span>
                 </button>
               </div>
             </form>
@@ -1843,6 +2218,7 @@ export const QuestionBankPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsEditCollectionModalOpen(false)}
+                disabled={isSavingCollection}
                 className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition"
               >
                 <X className="h-5 w-5" />
@@ -1871,6 +2247,12 @@ export const QuestionBankPage: React.FC = () => {
               </div>
 
               <div>
+                <label htmlFor="edit-collection-parent" className="block text-xs font-semibold text-slate-700">Inside collection</label>
+                <select id="edit-collection-parent" value={editingColParent} onChange={e => setEditingColParent(e.target.value)}
+                  className="mt-1 mb-3 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm">
+                  <option value="">Top level</option>
+                  {collectionTree.filter(({collection}) => collection.name !== editingColOrigName).map(({collection,depth}) => <option key={collection.name} value={collection.name}>{'— '.repeat(depth)}{collection.name}</option>)}
+                </select>
                 <label className="block text-xs font-semibold text-slate-700">
                   Target Exam Track
                 </label>
@@ -1909,11 +2291,12 @@ export const QuestionBankPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
+                  disabled={isSavingCollection}
                   style={{ backgroundColor: '#2563eb', color: '#ffffff' }}
                   className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition shadow-xs"
                 >
                   <Check className="h-4 w-4" />
-                  <span>Save Changes</span>
+                  <span>{isSavingCollection ? 'Saving Changes...' : 'Save Changes'}</span>
                 </button>
               </div>
             </form>
@@ -1945,50 +2328,17 @@ export const QuestionBankPage: React.FC = () => {
               </div>
             </div>
 
-            {deletingColCount > 0 ? (
-              <div className="space-y-3 bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
-                <p className="text-xs text-slate-700 font-medium">
-                  This collection contains <span className="font-bold text-slate-900">{deletingColCount}</span> questions. What would you like to do with them?
-                </p>
-                <div className="space-y-2">
-                  <label className="flex items-start gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="deleteColOption"
-                      checked={deleteColAction === 'keep'}
-                      onChange={() => setDeleteColAction('keep')}
-                      className="mt-0.5 text-blue-600 focus:ring-blue-500"
-                    />
-                    <div className="text-xs">
-                      <span className="font-semibold text-slate-800 block">Move questions to General Question Bank</span>
-                      <span className="text-slate-500">Keep questions active, only remove this collection grouping.</span>
-                    </div>
-                  </label>
-                  <label className="flex items-start gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="deleteColOption"
-                      checked={deleteColAction === 'delete'}
-                      onChange={() => setDeleteColAction('delete')}
-                      className="mt-0.5 text-rose-600 focus:ring-rose-500"
-                    />
-                    <div className="text-xs">
-                      <span className="font-semibold text-rose-800 block">Permanently delete questions too</span>
-                      <span className="text-slate-500">Delete all {deletingColCount} questions in this collection.</span>
-                    </div>
-                  </label>
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-slate-600">
-                This collection has 0 questions and will be removed from your collections list.
-              </p>
-            )}
+            <p className="rounded-xl border border-blue-100 bg-blue-50 p-3.5 text-sm text-slate-700">
+              {deletingColCount > 0
+                ? `The ${deletingColCount} ${deletingColCount === 1 ? 'question' : 'questions'} in this collection will be kept and moved to General Question Bank.`
+                : 'This empty collection will be removed.'}
+            </p>
 
             <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
               <button
                 type="button"
                 onClick={() => setIsDeleteCollectionModalOpen(false)}
+                disabled={isSavingCollection}
                 className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
               >
                 Cancel
@@ -1996,11 +2346,12 @@ export const QuestionBankPage: React.FC = () => {
               <button
                 type="button"
                 onClick={handleConfirmDeleteCollection}
+                disabled={isSavingCollection}
                 style={{ backgroundColor: '#e11d48', color: '#ffffff' }}
                 className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-rose-600 text-white text-xs font-semibold hover:bg-rose-700 transition shadow-xs"
               >
                 <Trash2 className="h-4 w-4" />
-                <span>Confirm Delete</span>
+                <span>{isSavingCollection ? 'Deleting Collection...' : 'Confirm Delete'}</span>
               </button>
             </div>
           </div>
@@ -2028,7 +2379,7 @@ export const QuestionBankPage: React.FC = () => {
                 <div>
                   <h3 className="text-base font-bold text-slate-900">Delete Question</h3>
                   <p className="text-xs text-slate-500">
-                    Are you sure you want to permanently delete this question?
+                    Remove this question from the active Question Bank and editable assessments? Existing student records will be preserved.
                   </p>
                 </div>
               </div>
@@ -2091,7 +2442,7 @@ export const QuestionBankPage: React.FC = () => {
             <div className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs">
               <AlertCircle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
               <span>
-                This will delete the question stem, attached diagrams, and solution derivation from the question bank. This action cannot be undone.
+                This removes the question from the active library. Assessments with previous student attempts are archived to preserve their results; other affected assessments are updated and may need republishing.
               </span>
             </div>
 
@@ -2152,7 +2503,7 @@ export const QuestionBankPage: React.FC = () => {
                     Delete {selectedQuestionIds.length} Question{selectedQuestionIds.length > 1 ? 's' : ''}
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Are you sure you want to permanently delete these questions?
+                    Remove these questions from the active Question Bank and editable assessments? Existing student records will be preserved.
                   </p>
                 </div>
               </div>
@@ -2169,7 +2520,7 @@ export const QuestionBankPage: React.FC = () => {
             <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs">
               <AlertCircle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
               <span>
-                You have selected <strong>{selectedQuestionIds.length} questions</strong> to permanently remove from the question bank. Their problem prompts, diagrams, and derivations will be erased.
+                You have selected <strong>{selectedQuestionIds.length} questions</strong>. Their assignments in unattempted draft assessments will be removed too. If any question belongs to a published assessment or an assessment with attempts, the entire deletion is blocked.
               </span>
             </div>
 
@@ -2247,7 +2598,7 @@ export const QuestionBankPage: React.FC = () => {
             <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs">
               <AlertCircle className="h-4 w-4 shrink-0 text-rose-600 mt-0.5" />
               <span>
-                This will permanently delete <strong>all {questions.length} questions</strong> from your repository. After clearing, your bank will remain completely empty until you create or import new questions, or choose to restore sample questions.
+                This operation may affect assessment availability. Historical student responses remain protected.
               </span>
             </div>
 
