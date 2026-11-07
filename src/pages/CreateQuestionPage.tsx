@@ -169,6 +169,8 @@ export const CreateQuestionPage: React.FC = () => {
 
   // Numeric Free Response / Grid-in Answer
   const [numericAnswer, setNumericAnswer] = useState('')
+  // step92-7-grid-format: numeric keys stay strict; text keys support short algebraic expressions.
+  const [gridAnswerKind, setGridAnswerKind] = useState<'numeric' | 'text'>('numeric')
   const [numericTolerance, setNumericTolerance] = useState('0')
   const [numericAlternateAnswers, setNumericAlternateAnswers] = useState('')
 
@@ -221,6 +223,7 @@ export const CreateQuestionPage: React.FC = () => {
       rationale: choice.rationale || '',
     })),
     numericAnswer,
+    gridAnswerKind,
     numericAlternateAnswers,
     numericTolerance,
     explanation,
@@ -245,6 +248,7 @@ export const CreateQuestionPage: React.FC = () => {
     imageCaption,
     choices,
     numericAnswer,
+    gridAnswerKind,
     numericAlternateAnswers,
     numericTolerance,
     explanation,
@@ -550,6 +554,7 @@ export const CreateQuestionPage: React.FC = () => {
         })))
       }
       setNumericAnswer(existing.numericAnswer || '')
+      setGridAnswerKind(existing.gridAnswerKind === 'text' ? 'text' : 'numeric')
       setNumericAlternateAnswers((existing.numericAlternateAnswers || []).join('\n'))
       setNumericTolerance(existing.numericTolerance || '0')
       setExplanation(existing.explanation || '')
@@ -1489,17 +1494,17 @@ export const CreateQuestionPage: React.FC = () => {
         throw new Error(message)
       }
     } else if (questionType === 'grid_in') {
-      if (parseNumericAnswer(numericAnswer) === null) {
-        const message = 'Enter a valid finite numeric answer (for example 2.5 or 5/2).'
+      if (!numericAnswer.trim() || (gridAnswerKind === 'numeric' && parseNumericAnswer(numericAnswer) === null)) {
+        const message = gridAnswerKind === 'text' ? 'Enter an accepted text or algebraic answer.' : 'Enter a valid finite numeric answer (for example 2.5 or 5/2).'
         setFormError(message)
         throw new Error(message)
       }
-      if (numericAlternateAnswers.split(/[,\n]/).some(answer => answer.trim() && parseNumericAnswer(answer.trim()) === null)) {
+      if (gridAnswerKind === 'numeric' && numericAlternateAnswers.split(/[,\n]/).some(answer => answer.trim() && parseNumericAnswer(answer.trim()) === null)) {
         const message = 'Each alternative answer must be a valid number or fraction.'
         setFormError(message)
         throw new Error(message)
       }
-      if (parseNumericTolerance(numericTolerance) === null) {
+      if (gridAnswerKind === 'numeric' && parseNumericTolerance(numericTolerance) === null) {
         const message = 'Tolerance must be a nonnegative number.'
         setFormError(message)
         throw new Error(message)
@@ -1553,7 +1558,8 @@ export const CreateQuestionPage: React.FC = () => {
       imageCaption,
       choices: questionType === 'grid_in' ? [] : choices.filter((c) => c.text.trim().length > 0),
       numericAnswer: questionType === 'grid_in' ? numericAnswer.trim() : undefined,
-      numericAlternateAnswers: questionType === 'grid_in' ? numericAlternateAnswers.split(/[,\n]/).map(a => a.trim()).filter(Boolean) : undefined,
+      gridAnswerKind: questionType === 'grid_in' ? gridAnswerKind : undefined,
+      numericAlternateAnswers: questionType === 'grid_in' ? numericAlternateAnswers.split(gridAnswerKind === 'text' ? /\n/ : /[,\n]/).map(a => a.trim()).filter(Boolean) : undefined,
       numericTolerance: questionType === 'grid_in' ? numericTolerance : undefined,
       explanation: explanation.trim(),
       commonMisconception: commonMisconception.trim(),
@@ -1746,7 +1752,7 @@ export const CreateQuestionPage: React.FC = () => {
 
   // Readiness is advisory; the authoritative save validations below remain unchanged.
   const hasValidAnswer = questionType === 'grid_in'
-    ? parseNumericAnswer(numericAnswer) !== null && parseNumericTolerance(numericTolerance) !== null && numericAlternateAnswers.split(/[,\n]/).every(answer => !answer.trim() || parseNumericAnswer(answer.trim()) !== null)
+    ? Boolean(numericAnswer.trim()) && (gridAnswerKind === 'text' || (parseNumericAnswer(numericAnswer) !== null && parseNumericTolerance(numericTolerance) !== null && numericAlternateAnswers.split(/[,\n]/).every(answer => !answer.trim() || parseNumericAnswer(answer.trim()) !== null)))
     : choices.filter(choice => choice.text.trim()).length >= 2 &&
       choices.some(choice => choice.isCorrect && choice.text.trim()) &&
       (questionType !== 'multiple_choice' || choices.filter(choice => choice.isCorrect && choice.text.trim()).length === 1)
@@ -2578,7 +2584,7 @@ export const CreateQuestionPage: React.FC = () => {
             {/* Section 4: Answer Choices or Free-Response Key */}
             <div id="question-editor-answers" className="space-y-4 pt-2">
               <p className="text-xs leading-relaxed text-slate-500">
-                {questionType === 'grid_in' ? 'Enter the correct numeric answer. Add a tolerance only if approximate answers should be accepted.' : questionType === 'multi_select' ? 'Add at least two answer options, then mark every correct option.' : 'Add at least two answer options, then mark the single correct answer.'}
+                {questionType === 'grid_in' ? 'Choose Numeric for numbers and fractions, or Text / algebraic expression for answers such as 3x.' : questionType === 'multi_select' ? 'Add at least two answer options, then mark every correct option.' : 'Add at least two answer options, then mark the single correct answer.'}
               </p>
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-2">
@@ -2600,20 +2606,29 @@ export const CreateQuestionPage: React.FC = () => {
               {questionType === 'grid_in' ? (
                 /* Free Response / Grid-in Section */
                 <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+                  <div className="space-y-1">
+                    <label htmlFor="grid-answer-format" className="block text-xs font-semibold text-slate-700">Answer format</label>
+                    <select id="grid-answer-format" value={gridAnswerKind}
+                      onChange={(e) => setGridAnswerKind(e.target.value as 'numeric' | 'text')}
+                      className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900">
+                      <option value="numeric">Numeric — number or fraction</option>
+                      <option value="text">Text / algebraic expression — e.g. 3x</option>
+                    </select>
+                  </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-semibold text-slate-700">
-                        Exact Numeric Answer Key
+                        {gridAnswerKind === 'text' ? 'Accepted Text / Algebraic Answer' : 'Exact Numeric Answer Key'}
                       </label>
                       <input
                         type="text"
                         value={numericAnswer}
                         onChange={(e) => setNumericAnswer(e.target.value)}
-                        placeholder="e.g. 2 or 5/2 or 2.5"
+                        placeholder={gridAnswerKind === 'text' ? 'e.g. 3x' : 'e.g. 2 or 5/2 or 2.5'}
                         className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-emerald-700 focus:border-blue-500 focus:outline-hidden"
                       />
                     </div>
-                    <div>
+                    {gridAnswerKind === 'numeric' && <div>
                       <label className="block text-xs font-semibold text-slate-700">
                         Tolerance Window (±)
                       </label>
@@ -2624,7 +2639,7 @@ export const CreateQuestionPage: React.FC = () => {
                         placeholder="0 for exact matching"
                         className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs focus:border-blue-500 focus:outline-hidden"
                       />
-                    </div>
+                    </div>}
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-slate-700">Other accepted answers (optional)</label>
@@ -2632,13 +2647,13 @@ export const CreateQuestionPage: React.FC = () => {
                       value={numericAlternateAnswers}
                       onChange={(e) => setNumericAlternateAnswers(e.target.value)}
                       rows={3}
-                      placeholder={'One answer per line, e.g. 3\n-3'}
+                      placeholder={gridAnswerKind === 'text' ? 'One accepted expression per line, e.g. 3 X' : 'One number per line, e.g. 3\n-3'}
                       className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs focus:border-blue-500 focus:outline-hidden"
                     />
-                    <p className="mt-1 text-xs text-slate-500">Use this only when more than one distinct numeric answer is correct. Equivalent values such as 0.5 and 1/2 already represent the same answer.</p>
+                    <p className="mt-1 text-xs text-slate-500">{gridAnswerKind === 'text' ? 'Add alternative accepted spellings or forms, one per line. Expression comparison follows your installed server grader.' : 'Use this only when more than one distinct numeric answer is correct. Equivalent values such as 0.5 and 1/2 already represent the same answer.'}</p>
                   </div>
                   <p className="text-[11px] text-slate-500 leading-relaxed">
-                    Students will enter their numeric value directly into an onscreen keypad. Fractions and decimals are normalized automatically.
+                    {gridAnswerKind === 'text' ? 'Students will type a short text or algebraic response.' : 'Students will enter a numeric value; fractions and decimals are normalized automatically.'}
                   </p>
                 </div>
               ) : (
@@ -2947,7 +2962,7 @@ export const CreateQuestionPage: React.FC = () => {
               <div className="pt-2 space-y-2">
                 <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">
                   {questionType === 'grid_in'
-                    ? 'Student Numeric Input:'
+                    ? 'Student Free Response:'
                     : questionType === 'multi_select'
                     ? 'Student Options (Select all that apply):'
                     : 'Student Options (Click to test):'}
@@ -2959,7 +2974,7 @@ export const CreateQuestionPage: React.FC = () => {
                       type="text"
                       value={previewInputAnswer}
                       onChange={(e) => setPreviewInputAnswer(e.target.value)}
-                      placeholder="Enter numeric answer (e.g. 2)..."
+                      placeholder={gridAnswerKind === 'text' ? 'Enter an expression, e.g. 3x' : 'Enter a number or fraction...'}
                       className="w-full rounded-xl border-2 border-blue-200 p-3 text-sm font-semibold text-slate-800 focus:outline-hidden focus:border-blue-500"
                     />
                     {showExplanationInPreview && (
