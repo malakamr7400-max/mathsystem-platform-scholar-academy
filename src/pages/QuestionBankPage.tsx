@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import AdminLayout from '../components/AdminLayout'
+import { MathRenderer } from '../components/MathRenderer'
 import { LibraryMetric, LibraryPagination } from '../components/library/LibraryUI'
 import 'katex/dist/katex.min.css'
 import { InlineMath, BlockMath } from 'react-katex'
@@ -1560,8 +1561,8 @@ export const QuestionBankPage: React.FC = () => {
                     </div>
 
                     {/* Problem Stem (with KaTeX formatting) */}
-                    <div className="text-xs sm:text-sm text-slate-800 leading-relaxed font-medium">
-                      {renderMathSafe(q.prompt)}
+                    <div className="min-w-0 max-w-full overflow-x-auto py-1 text-sm leading-relaxed text-slate-800 sm:text-base">
+                      <MathRenderer text={q.prompt} />
                     </div>
 
                     {/* Stimulus / Diagram formatted fitting with question size */}
