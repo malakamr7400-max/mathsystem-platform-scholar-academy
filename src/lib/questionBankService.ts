@@ -4518,13 +4518,22 @@ export const questionBankService = {
 
   async updateCollectionAndPersist(oldName: string, updatedData: { name: string; description?: string; targetExam?: string; colorTag?: string; parentName?: string | null }) {
     try {
-      if (!_hasLoadedCollections) await this.fetchCollectionsFromDatabase()
+      // Fetch fresh metadata before validating names; cached collections may
+      // be stale when another tab/user created a folder after page load.
+      await this.fetchCollectionsFromDatabase()
       const newName = updatedData.name.trim()
       if (!newName) return { success: false, error: 'Collection name cannot be empty.' }
 
       const currentCols = _collectionsCache
-      const collision = currentCols.find((c) => c.name.toLowerCase() === newName.toLowerCase() && c.name.toLowerCase() !== oldName.toLowerCase())
-      if (collision) return { success: false, error: `A collection named "${newName}" already exists.` }
+      // Include virtual collections backed by questions, not just persisted
+      // collection metadata. This check is case-insensitive and trim-aware.
+      const normalizedNew = newName.toLocaleLowerCase()
+      const normalizedOld = oldName.trim().toLocaleLowerCase()
+      const collision = this.getCollectionsList().find((c) =>
+        c.name.trim().toLocaleLowerCase() === normalizedNew &&
+        c.name.trim().toLocaleLowerCase() !== normalizedOld
+      )
+      if (collision) return { success: false, error: `A collection named "${newName}" already exists. Choose a different name.` }
       const persistedCollection = currentCols.find((c) => c.name.toLowerCase() === oldName.toLowerCase())
       // Imports from older versions can appear as virtual folders backed by
       // questions but have no question_bank_collections metadata row yet.
@@ -4557,6 +4566,18 @@ export const questionBankService = {
         .select('organization_id').eq('id', authData.user.id).single()
       if (profileError) throw profileError
       if (!profile?.organization_id) throw new Error('No organization is assigned to your account.')
+
+      // Check question_sets even when the source folder has no questions/set.
+      // A destination can exist independently of collection metadata, and must
+      // never be silently merged or overwritten by a rename.
+      if (renameRequired) {
+        const { data: destinationSets, error: destinationError } = await supabase.from('question_sets')
+          .select('id').eq('organization_id', profile.organization_id).ilike('title', newName).limit(1)
+        if (destinationError) throw destinationError
+        if ((destinationSets || []).length > 0) {
+          return { success: false, error: `A collection named "${newName}" already exists. Choose a different name.` }
+        }
+      }
 
       // Membership lives in questions.question_set_id, not in the question
       // content. Renaming its question_sets.title updates the visible collection

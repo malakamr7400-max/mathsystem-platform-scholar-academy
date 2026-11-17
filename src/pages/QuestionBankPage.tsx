@@ -79,6 +79,39 @@ export const QuestionBankPage: React.FC = () => {
     return results
   }, [collections])
 
+  // Display aggregate question counts for folder trees. Stored questionCount
+  // remains the direct count, so deletion and collection operations retain
+  // their existing semantics.
+  const collectionTreeCounts = useMemo(() => {
+    const byParent = new Map<string, QuestionCollection[]>()
+    for (const collection of collections) {
+      const parent = collection.parentName || ''
+      const children = byParent.get(parent) || []
+      children.push(collection)
+      byParent.set(parent, children)
+    }
+
+    const totals = new Map<string, number>()
+    const visiting = new Set<string>()
+    const count = (collection: QuestionCollection): number => {
+      const cached = totals.get(collection.name)
+      if (cached !== undefined) return cached
+      // Corrupted/legacy parent cycles should not crash the explorer.
+      if (visiting.has(collection.name)) return 0
+      visiting.add(collection.name)
+      const direct = Math.max(0, Number(collection.questionCount) || 0)
+      const descendants = (byParent.get(collection.name) || [])
+        .reduce((sum, child) => sum + count(child), 0)
+      visiting.delete(collection.name)
+      const total = direct + descendants
+      totals.set(collection.name, total)
+      return total
+    }
+
+    collections.forEach(count)
+    return totals
+  }, [collections])
+
   const visibleCollectionTree = useMemo(() => {
     const query = collectionSearch.trim().toLowerCase()
     const byName = new Map(collections.map(c => [c.name, c]))
@@ -528,6 +561,20 @@ export const QuestionBankPage: React.FC = () => {
       return
     }
 
+    // Catch duplicate names before starting a network operation. Include
+    // virtual folders inferred from questions in the displayed collection list.
+    const requestedName = editingColName.trim()
+    const alreadyExists = collections.some((col) =>
+      col.name.trim().toLocaleLowerCase() === requestedName.toLocaleLowerCase() &&
+      col.name.trim().toLocaleLowerCase() !== editingColOrigName.trim().toLocaleLowerCase()
+    )
+    if (alreadyExists) {
+      const message = `A collection named "${requestedName}" already exists. Choose a different name.`
+      setEditColError(message)
+      setImportStatusMessage({ type: 'error', text: message })
+      return
+    }
+
     collectionRequestInFlightRef.current = true
     setIsSavingCollection(true)
     setImportStatusMessage({ type: 'success', text: 'Saving collection changes… Please wait.' })
@@ -538,7 +585,9 @@ export const QuestionBankPage: React.FC = () => {
       })
 
     if (!res.success) {
-      setEditColError(res.error || 'Failed to update collection.')
+      const message = res.error || 'Failed to update collection.'
+      setEditColError(message)
+      setImportStatusMessage({ type: 'error', text: message })
       return
     }
 
@@ -552,7 +601,9 @@ export const QuestionBankPage: React.FC = () => {
         text: `Collection "${editingColName.trim()}" updated successfully!`,
       })
     } catch (err: any) {
-      setEditColError(err?.message || 'Failed to update collection.')
+      const message = err?.message || 'Failed to update collection.'
+      setEditColError(message)
+      setImportStatusMessage({ type: 'error', text: message })
     } finally {
       setIsSavingCollection(false)
       collectionRequestInFlightRef.current = false
@@ -1058,7 +1109,7 @@ export const QuestionBankPage: React.FC = () => {
                             aria-label={`View questions in ${collection.name}`}>
                             {hasChildren && !collapsed ? <FolderOpen className={`h-[18px] w-[18px] shrink-0 ${active ? 'text-[#205665]' : 'text-[#6d929a]'}`}/> : <Folder className={`h-[18px] w-[18px] shrink-0 ${active ? 'text-[#205665]' : 'text-[#78939f]'}`}/>}
                             <span className={`truncate text-sm ${active ? 'font-bold text-[#173f49]' : 'font-medium text-[#294251]'}`}>{collection.name}</span>
-                            <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">{collection.questionCount}</span>
+                            <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500" title="Total questions in this folder and its subfolders">{collectionTreeCounts.get(collection.name) ?? collection.questionCount}</span>
                             {active && <span className="hidden text-[11px] font-semibold text-[#28737b] sm:inline">Selected</span>}
                           </button>
                         </div>
@@ -1078,7 +1129,7 @@ export const QuestionBankPage: React.FC = () => {
                   })}
                 </div>
               )}
-              <p className="mt-3 text-xs text-slate-500">Question counts are for each folder only. Deleting a collection keeps its questions.</p>
+              <p className="mt-3 text-xs text-slate-500">Question counts include all nested subfolders. Deleting a collection keeps its questions.</p>
             </div>
           )}
         </section>
