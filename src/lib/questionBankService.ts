@@ -627,6 +627,57 @@ const _supabaseLessonIdMap = new Map<string, string>()
 let _collectionsCache: QuestionCollection[] = []
 let _hasLoadedCollections = false
 
+// Scoped to a single import. Never cache another user's organization or permissions
+// across sessions. The normal single-question save path remains unchanged.
+interface ImportSyncContext {
+  organizationId: string
+  answerTypeIds: Map<string, string>
+  questionSetIds: Map<string, Promise<string>>
+}
+
+async function buildImportSyncContext(): Promise<ImportSyncContext> {
+  const { data: auth, error: authError } = await supabase.auth.getUser()
+  if (authError) throw authError
+  if (!auth.user?.id) throw new Error('Sign in before importing questions.')
+  const { data: profile, error: profileError } = await supabase.from('profiles')
+    .select('organization_id, role').eq('id', auth.user.id).single()
+  if (profileError) throw profileError
+  if (!profile?.organization_id || !['admin', 'teacher'].includes(String(profile.role).toLowerCase())) {
+    throw new Error('Your account is not permitted to import questions.')
+  }
+  const { data: answerTypes, error: answerTypeError } = await supabase
+    .from('answer_types').select('id, code').eq('is_active', true)
+  if (answerTypeError) throw answerTypeError
+  const answerTypeIds = new Map<string, string>()
+  for (const answerType of answerTypes || []) {
+    const key = String(answerType.code || '').toUpperCase()
+    if (key && !answerTypeIds.has(key)) answerTypeIds.set(key, String(answerType.id))
+  }
+  if (!answerTypeIds.has('MCQ') && !answerTypeIds.has('MULTIPLE_CHOICE')) {
+    throw new Error('Multiple-choice answer type is not configured in Staging.')
+  }
+  return { organizationId: String(profile.organization_id), answerTypeIds, questionSetIds: new Map() }
+}
+
+async function getImportQuestionSetId(context: ImportSyncContext, collectionName: string): Promise<string> {
+  const key = collectionName.trim()
+  let pending = context.questionSetIds.get(key)
+  if (!pending) {
+    pending = (async () => {
+      const { data: existing, error: findError } = await supabase.from('question_sets')
+        .select('id').eq('organization_id', context.organizationId).eq('title', key).maybeSingle()
+      if (findError) throw findError
+      if (existing?.id) return String(existing.id)
+      const { data: created, error: createError } = await supabase.from('question_sets')
+        .insert({ organization_id: context.organizationId, title: key }).select('id').single()
+      if (createError) throw createError
+      return String(created.id)
+    })()
+    context.questionSetIds.set(key, pending)
+  }
+  return pending
+}
+
 interface DetectedTaxonomySchema {
   hasTaxonomyTable: boolean
   hasCurriculumTaxonomyTable: boolean
@@ -1683,7 +1734,7 @@ export const questionBankService = {
   /**
   * Sync a question bank item to Supabase
    */
-  async syncQuestionToDatabase(question: QuestionBankItem): Promise<boolean> {
+  async syncQuestionToDatabase(question: QuestionBankItem, importContext?: ImportSyncContext): Promise<boolean> {
     const sanitized: QuestionBankItem = {
       ...question,
       domain: (question.domain || '').trim(),
@@ -1701,60 +1752,60 @@ export const questionBankService = {
     }
 
     try {
-      // 1. Resolve Organization ID (required by Supabase schema)
-      let orgId: string | null = null
-      try {
-        const { data: orgData } = await supabase.from('organizations').select('id').limit(1).maybeSingle()
-        if (orgData?.id) orgId = orgData.id
-      } catch (e) {
-        console.warn('Could not query organization in Supabase:', e)
-      }
-
-      // 2. Resolve Answer Type ID (required foreign key in Supabase schema)
-      let answerTypeId: string | null = null
-      try {
-        const { data: answerTypes } = await supabase.from('answer_types').select('id, code')
-        if (Array.isArray(answerTypes) && answerTypes.length > 0) {
-          const typeMap = new Map<string, string>()
-          answerTypes.forEach((at) => typeMap.set(String(at.code).toUpperCase(), at.id))
-
-          let targetCode = 'MCQ'
-          if (question.questionType === 'grid_in') {
-            targetCode = 'GRID_IN'
-          } else if (question.questionType === 'multi_select') {
-            targetCode = typeMap.has('MULTI_SELECT') ? 'MULTI_SELECT' : 'MCQ'
-          }
-
-          answerTypeId = typeMap.get(targetCode) || answerTypes[0].id
+      // Import batches reuse the same verified organization, answer types and
+      // collection lookup. Single-question edits retain their existing path.
+      let orgId: string | null = importContext?.organizationId || null
+      if (!importContext) {
+        try {
+          const { data: orgData } = await supabase.from('organizations').select('id').limit(1).maybeSingle()
+          if (orgData?.id) orgId = orgData.id
+        } catch (e) {
+          console.warn('Could not query organization in Supabase:', e)
         }
-      } catch (e) {
-        console.warn('Could not query answer_types in Supabase:', e)
       }
 
-      // 3. Resolve Question Set ID
+      let answerTypeId: string | null = null
+      if (importContext) {
+        const types = importContext.answerTypeIds
+        const target = question.questionType === 'grid_in' ? 'GRID_IN'
+          : question.questionType === 'multi_select' && types.has('MULTI_SELECT') ? 'MULTI_SELECT' : 'MCQ'
+        answerTypeId = types.get(target) || (target === 'MCQ' ? types.get('MULTIPLE_CHOICE') : types.get('GRID_IN')) || null
+        if (!answerTypeId) throw new Error(`Missing answer type for ${question.questionType}. Import was stopped.`)
+      } else {
+        try {
+          const { data: answerTypes } = await supabase.from('answer_types').select('id, code')
+          if (Array.isArray(answerTypes) && answerTypes.length > 0) {
+            const typeMap = new Map<string, string>()
+            answerTypes.forEach((at) => typeMap.set(String(at.code).toUpperCase(), at.id))
+            let targetCode = 'MCQ'
+            if (question.questionType === 'grid_in') targetCode = 'GRID_IN'
+            else if (question.questionType === 'multi_select') {
+              targetCode = typeMap.has('MULTI_SELECT') ? 'MULTI_SELECT' : 'MCQ'
+            }
+            answerTypeId = typeMap.get(targetCode) || answerTypes[0].id
+          }
+        } catch (e) {
+          console.warn('Could not query answer_types in Supabase:', e)
+        }
+      }
+
       let questionSetId: string | null = null
       const setName = question.collection?.trim() || 'General Question Bank'
-      try {
-        const { data: existingSet } = await supabase
-          .from('question_sets')
-          .select('id')
-          .eq('title', setName)
-          .maybeSingle()
-        if (existingSet?.id) {
-          questionSetId = existingSet.id
-        } else if (orgId) {
-          const { data: newSet } = await supabase
-            .from('question_sets')
-            .insert({
-              organization_id: orgId,
-              title: setName,
-            })
-            .select('id')
-            .maybeSingle()
-          if (newSet?.id) questionSetId = newSet.id
+      if (importContext) {
+        questionSetId = await getImportQuestionSetId(importContext, setName)
+      } else {
+        try {
+          const { data: existingSet } = await supabase.from('question_sets')
+            .select('id').eq('title', setName).maybeSingle()
+          if (existingSet?.id) questionSetId = existingSet.id
+          else if (orgId) {
+            const { data: newSet } = await supabase.from('question_sets')
+              .insert({ organization_id: orgId, title: setName }).select('id').maybeSingle()
+            if (newSet?.id) questionSetId = newSet.id
+          }
+        } catch (e) {
+          console.warn('Could not resolve question_set in Supabase:', e)
         }
-      } catch (e) {
-        console.warn('Could not resolve question_set in Supabase:', e)
       }
 
       // 4. Generic taxonomy relationships are the authoritative taxonomy model.
@@ -4382,7 +4433,7 @@ export const questionBankService = {
     })
   },
 
-  async persistCollections(collections: QuestionCollection[]): Promise<void> {
+  async persistCollections(collections: QuestionCollection[], changedNames?: ReadonlySet<string>): Promise<void> {
     if (!isSupabaseConfigured) throw new Error('Supabase is not configured.')
 
     const { data: authData, error: authError } = await supabase.auth.getUser()
@@ -4405,6 +4456,7 @@ export const questionBankService = {
     // a stale client cache must never erase collections that already exist in Supabase.
     for (const collection of collections) {
       const name = String(collection.name || '').trim()
+      if (changedNames && !changedNames.has(name.toLowerCase())) continue
       if (!name) throw new Error('Collection name cannot be empty.')
       const now = new Date().toISOString()
       const { error } = await supabase
@@ -4473,8 +4525,17 @@ export const questionBankService = {
       const currentCols = _collectionsCache
       const collision = currentCols.find((c) => c.name.toLowerCase() === newName.toLowerCase() && c.name.toLowerCase() !== oldName.toLowerCase())
       if (collision) return { success: false, error: `A collection named "${newName}" already exists.` }
-      const existing = currentCols.find((c) => c.name.toLowerCase() === oldName.toLowerCase())
+      const persistedCollection = currentCols.find((c) => c.name.toLowerCase() === oldName.toLowerCase())
+      // Imports from older versions can appear as virtual folders backed by
+      // questions but have no question_bank_collections metadata row yet.
+      const virtualCollection = !persistedCollection
+        ? this.getCollectionsList().find((c) =>
+            c.name.toLowerCase() === oldName.toLowerCase() && c.id?.startsWith('col-auto-')
+          )
+        : null
+      const existing = persistedCollection || virtualCollection
       if (!existing) return { success: false, error: `Collection "${oldName}" was not found.` }
+      const collectionsForUpdate = persistedCollection ? currentCols : [...currentCols, existing]
 
       const nextParent = updatedData.parentName === undefined ? (existing.parentName || null) : updatedData.parentName
       if (nextParent && !currentCols.some(c => c.name === nextParent)) return { success: false, error: 'Parent collection not found.' }
@@ -4485,24 +4546,68 @@ export const questionBankService = {
         seen.add(ancestor.toLowerCase())
         ancestor = currentCols.find(c => c.name === ancestor)?.parentName || null
       }
-      const updatedCols = currentCols.map((c) => c.name.toLowerCase() === oldName.toLowerCase()
+      const updatedCols = collectionsForUpdate.map((c) => c.name.toLowerCase() === oldName.toLowerCase()
         ? { ...c, name: newName, parentName: nextParent, description: updatedData.description ?? c.description, targetExam: updatedData.targetExam ?? c.targetExam, colorTag: updatedData.colorTag ?? c.colorTag, updatedAt: new Date().toISOString() }
         : c.parentName?.toLowerCase() === oldName.toLowerCase() ? { ...c, parentName: newName } : c)
-      const currentQuestions = this.getStoredQuestions()
-      const updatedQuestions = currentQuestions.map((q) => q.collection?.toLowerCase() === oldName.toLowerCase() ? { ...q, collection: newName } : q)
+      const renameRequired = newName !== oldName
+      const { data: authData, error: authError } = await supabase.auth.getUser()
+      if (authError) throw authError
+      if (!authData.user?.id) throw new Error('Sign in before editing collections.')
+      const { data: profile, error: profileError } = await supabase.from('profiles')
+        .select('organization_id').eq('id', authData.user.id).single()
+      if (profileError) throw profileError
+      if (!profile?.organization_id) throw new Error('No organization is assigned to your account.')
 
-      await this.persistCollections(updatedCols)
-      if (newName.toLowerCase() !== oldName.toLowerCase()) {
-        const { data: authData, error: authError } = await supabase.auth.getUser()
-        if (authError) throw authError
-        const userId = authData.user?.id
-        if (!userId) throw new Error('You must be signed in to rename collections.')
-        const { data: profile, error: profileError } = await supabase.from('profiles').select('organization_id').eq('id', userId).maybeSingle()
-        if (profileError) throw profileError
-        if (!profile?.organization_id) throw new Error('Your account is not assigned to an organization.')
-        const { error: deleteError } = await supabase.from('question_bank_collections').delete().eq('organization_id', profile.organization_id).eq('name_key', oldName.toLowerCase())
-        if (deleteError) throw deleteError
-        await this.saveQuestions(updatedQuestions)
+      // Membership lives in questions.question_set_id, not in the question
+      // content. Renaming its question_sets.title updates the visible collection
+      // for every linked question without touching questions, answers or taxonomy.
+      let renamedSetIds: string[] = []
+      if (renameRequired) {
+        const { data: matchingSets, error: findError } = await supabase.from('question_sets')
+          .select('id').eq('organization_id', profile.organization_id).eq('title', oldName)
+        if (findError) throw findError
+        renamedSetIds = (matchingSets || []).map((set) => String(set.id))
+        if (renamedSetIds.length > 0) {
+          const { data: collisionSets, error: collisionError } = await supabase.from('question_sets')
+            .select('id').eq('organization_id', profile.organization_id).eq('title', newName).limit(1)
+          if (collisionError) throw collisionError
+          if ((collisionSets || []).some((set) => !renamedSetIds.includes(String(set.id)))) {
+            throw new Error(`A question collection named "${newName}" already exists.`)
+          }
+          const { error: renameError } = await supabase.from('question_sets')
+            .update({ title: newName }).eq('organization_id', profile.organization_id)
+            .in('id', renamedSetIds)
+          if (renameError) throw renameError
+        }
+      }
+
+      // Write only this folder and children whose parent reference changed.
+      const changedNames = new Set(updatedCols.filter((c) =>
+        c.name.toLowerCase() === newName.toLowerCase() ||
+        c.parentName?.toLowerCase() === newName.toLowerCase()
+      ).map((c) => c.name.toLowerCase()))
+      try {
+        await this.persistCollections(updatedCols, changedNames)
+        if (newName.toLowerCase() !== oldName.toLowerCase() && persistedCollection) {
+          const { error: deleteError } = await supabase.from('question_bank_collections')
+            .delete().eq('organization_id', profile.organization_id).eq('name_key', oldName.toLowerCase())
+          if (deleteError) throw deleteError
+        }
+      } catch (error) {
+        // Best-effort compensation for a metadata failure; no question content
+        // has been rewritten. Surface the original error for manual review.
+        if (renamedSetIds.length > 0) {
+          const { error: revertError } = await supabase.from('question_sets')
+            .update({ title: oldName }).eq('organization_id', profile.organization_id)
+            .in('id', renamedSetIds)
+          if (revertError) console.error('Question-set rename rollback failed:', revertError)
+        }
+        throw error
+      }
+      if (renameRequired) {
+        _questionsCache = _questionsCache.map((q) =>
+          q.collection?.toLowerCase() === oldName.toLowerCase() ? { ...q, collection: newName } : q
+        )
       }
       return { success: true }
     } catch (error: any) {
@@ -4791,7 +4896,8 @@ export const questionBankService = {
 
       const questionItem: QuestionBankItem = {
         id: item.id ? String(item.id).trim() : `qb-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
-        collection: item.collection || targetCollection,
+        // The collection name selected in the import dialog is authoritative.
+        collection: targetCollection,
         domain,
         chapter,
         lesson,
@@ -4824,28 +4930,39 @@ export const questionBankService = {
       }
     }
 
-    // Merge into general question bank repository
-    const existing = this.getStoredQuestions()
-    // Append or replace matching IDs
-    const existingIds = new Set(importedQuestions.map((q) => q.id))
-    const merged = [...importedQuestions, ...existing.filter((q) => !existingIds.has(q.id))]
-    _questionsCache = merged
-
-    // Persist questions through Supabase
-    const saved = await this.saveQuestions(merged)
-    if (!saved) {
+    // Only persist imported/updated items. Re-saving the entire bank performs
+    // costly destructive replacement of every question's choices/taxonomy links.
+    // Keep concurrency bounded to avoid overwhelming Supabase with large pools.
+    try {
+      const context = await buildImportSyncContext()
+      const concurrency = 4
+      for (let offset = 0; offset < importedQuestions.length; offset += concurrency) {
+        await Promise.all(importedQuestions.slice(offset, offset + concurrency)
+          .map((question) => this.syncQuestionToDatabase(question, context)))
+      }
+    } catch (error: any) {
+      console.error('Question pool import failed:', error)
+      // A batch may have committed earlier questions; no silent success. The
+      // importer must remain idempotent when retried with the same UUIDs.
       return {
         success: false,
         count: 0,
         collectionName: targetCollection,
-        errors: ['Failed to save imported questions to Supabase.'],
+        errors: [error?.message || 'Failed to save imported questions to Supabase.'],
       }
     }
+
+    const existing = this.getStoredQuestions()
+    const importedIds = new Set(importedQuestions.map((q) => q.id))
+    _questionsCache = [...importedQuestions, ...existing.filter((q) => !importedIds.has(q.id))]
+    _hasLoadedQuestions = true
 
     // Ensure collection is registered in stored collections
     const storedCols = this.getStoredCollections()
     if (!storedCols.some((c) => c.name.toLowerCase() === targetCollection.toLowerCase())) {
-      this.saveStoredCollections([
+      // Await metadata persistence before showing import success. Otherwise
+      // immediate edits can race against a missing collection row.
+      await this.persistCollections([
         ...storedCols,
         {
           id: `col-import-${Date.now()}`,
@@ -4856,7 +4973,7 @@ export const questionBankService = {
           questionCount: importedQuestions.length,
           createdAt: new Date().toISOString(),
         },
-      ])
+      ], new Set([targetCollection.toLowerCase()]))
     }
 
     return {
