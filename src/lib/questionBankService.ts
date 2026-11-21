@@ -659,20 +659,59 @@ async function buildImportSyncContext(): Promise<ImportSyncContext> {
   return { organizationId: String(profile.organization_id), answerTypeIds, questionSetIds: new Map() }
 }
 
+/**
+ * Resolve exactly one question_set in the signed-in organization. Never hide a
+ * multiple-row error by inserting another duplicate, and never select a set
+ * belonging to a different organization. The database unique index installed
+ * after the guarded Staging cleanup is the final concurrency protection.
+ */
+async function resolveQuestionSetId(organizationId: string, collectionName: string): Promise<string> {
+  const title = collectionName.trim()
+  if (!title) throw new Error('Collection name cannot be empty.')
+  const normalized = title.toLocaleLowerCase()
+
+  const lookup = async (): Promise<string[]> => {
+    const { data, error } = await supabase.from('question_sets')
+      .select('id, title')
+      .eq('organization_id', organizationId)
+      .ilike('title', title)
+      .limit(2)
+    if (error) throw error
+    return (data || [])
+      .filter((row) => String(row.title || '').trim().toLocaleLowerCase() === normalized)
+      .map((row) => String(row.id))
+  }
+
+  const matchingIds = await lookup()
+  if (matchingIds.length > 1) {
+    throw new Error(`Collection "${title}" has duplicate database records. Import stopped safely; ask an administrator to complete the Staging collection repair.`)
+  }
+  if (matchingIds.length === 1) return matchingIds[0]
+
+  const { data: created, error: createError } = await supabase.from('question_sets')
+    .insert({ organization_id: organizationId, title })
+    .select('id').single()
+  if (!createError && created?.id) return String(created.id)
+
+  // After the unique index is installed, concurrent inserts produce 23505.
+  // Reuse the winning row, but do not mistake multiple matches for success.
+  if (createError?.code === '23505') {
+    const concurrentIds = await lookup()
+    if (concurrentIds.length === 1) return concurrentIds[0]
+    if (concurrentIds.length > 1) {
+      throw new Error(`Collection "${title}" has duplicate database records. Import stopped safely.`)
+    }
+    throw new Error(`Collection "${title}" already exists with a conflicting name. Refresh and try again.`)
+  }
+  if (createError) throw createError
+  throw new Error(`Unable to confirm the database collection "${title}" was created.`)
+}
+
 async function getImportQuestionSetId(context: ImportSyncContext, collectionName: string): Promise<string> {
-  const key = collectionName.trim()
+  const key = collectionName.trim().toLocaleLowerCase()
   let pending = context.questionSetIds.get(key)
   if (!pending) {
-    pending = (async () => {
-      const { data: existing, error: findError } = await supabase.from('question_sets')
-        .select('id').eq('organization_id', context.organizationId).eq('title', key).maybeSingle()
-      if (findError) throw findError
-      if (existing?.id) return String(existing.id)
-      const { data: created, error: createError } = await supabase.from('question_sets')
-        .insert({ organization_id: context.organizationId, title: key }).select('id').single()
-      if (createError) throw createError
-      return String(created.id)
-    })()
+    pending = resolveQuestionSetId(context.organizationId, collectionName)
     context.questionSetIds.set(key, pending)
   }
   return pending
@@ -1752,16 +1791,18 @@ export const questionBankService = {
     }
 
     try {
-      // Import batches reuse the same verified organization, answer types and
-      // collection lookup. Single-question edits retain their existing path.
-      let orgId: string | null = importContext?.organizationId || null
+      // Always use the signed-in user's organization. Selecting the first
+      // organization is unsafe in multi-tenant Staging and Production.
+      let orgId: string = importContext?.organizationId || ''
       if (!importContext) {
-        try {
-          const { data: orgData } = await supabase.from('organizations').select('id').limit(1).maybeSingle()
-          if (orgData?.id) orgId = orgData.id
-        } catch (e) {
-          console.warn('Could not query organization in Supabase:', e)
-        }
+        const { data: auth, error: authError } = await supabase.auth.getUser()
+        if (authError) throw authError
+        if (!auth.user?.id) throw new Error('Sign in before saving questions.')
+        const { data: profile, error: profileError } = await supabase.from('profiles')
+          .select('organization_id').eq('id', auth.user.id).single()
+        if (profileError) throw profileError
+        if (!profile?.organization_id) throw new Error('No organization is assigned to your account.')
+        orgId = String(profile.organization_id)
       }
 
       let answerTypeId: string | null = null
@@ -1789,24 +1830,10 @@ export const questionBankService = {
         }
       }
 
-      let questionSetId: string | null = null
       const setName = question.collection?.trim() || 'General Question Bank'
-      if (importContext) {
-        questionSetId = await getImportQuestionSetId(importContext, setName)
-      } else {
-        try {
-          const { data: existingSet } = await supabase.from('question_sets')
-            .select('id').eq('title', setName).maybeSingle()
-          if (existingSet?.id) questionSetId = existingSet.id
-          else if (orgId) {
-            const { data: newSet } = await supabase.from('question_sets')
-              .insert({ organization_id: orgId, title: setName }).select('id').maybeSingle()
-            if (newSet?.id) questionSetId = newSet.id
-          }
-        } catch (e) {
-          console.warn('Could not resolve question_set in Supabase:', e)
-        }
-      }
+      const questionSetId = importContext
+        ? await getImportQuestionSetId(importContext, setName)
+        : await resolveQuestionSetId(orgId, setName)
 
       // 4. Generic taxonomy relationships are the authoritative taxonomy model.
       // If taxonomyNodeIds is present on the question (including an explicit empty
@@ -4969,7 +4996,7 @@ export const questionBankService = {
         success: false,
         count: 0,
         collectionName: targetCollection,
-        errors: [error?.message || 'Failed to save imported questions to Supabase.'],
+        errors: [error?.message || 'Failed to save imported questions to Supabase.', 'Do not retry blindly: some questions may have been saved before this error.'],
       }
     }
 
