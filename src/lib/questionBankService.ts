@@ -615,6 +615,11 @@ export const INITIAL_SEED_QUESTIONS: QuestionBankItem[] = [
 let _questionsCache: QuestionBankItem[] = []
 let _hasLoadedQuestions = false
 
+// The Supabase schema differs between deployments. Once PostgREST confirms a
+// duration column is missing, remember that for this browser session instead of
+// repeating one or two failed HTTP requests for every question.
+let _questionDurationColumn: 'estimated_seconds' | 'time_limit_seconds' | null = 'estimated_seconds'
+
 // Database-backed taxonomy cache - starts empty, strictly populated from database
 let _taxonomyCache: TaxonomyRegistry = {}
 let _hasLoadedTaxonomy = false
@@ -1883,7 +1888,6 @@ export const questionBankService = {
         content_blocks: contentBlocks,
         explanation_blocks: explanationBlocks,
         status: 'published',
-        estimated_seconds: estSeconds,
       }
 
       if (isUuid) payload.id = sanitized.id
@@ -1900,22 +1904,31 @@ export const questionBankService = {
       let qData: any = null
       let qError: any = null
 
-      const res1 = await supabase.from('questions').upsert(payload).select('id').maybeSingle()
-      qData = res1.data
-      qError = res1.error
-
-      // If estimated_seconds column does not exist, try with time_limit_seconds or without
-      if (qError && qError.message && qError.message.includes('estimated_seconds')) {
+      // Preserve existing duration-column compatibility, but learn the working
+      // schema after the first save. Without this cache, a batch of 249 questions
+      // can produce ~498 avoidable HTTP 400 requests before successful writes.
+      for (let attempt = 0; attempt < 3; attempt++) {
         delete payload.estimated_seconds
-        payload.time_limit_seconds = estSeconds
-        const res2 = await supabase.from('questions').upsert(payload).select('id').maybeSingle()
-        qData = res2.data
-        qError = res2.error
-        if (qError && qError.message && qError.message.includes('time_limit_seconds')) {
-          delete payload.time_limit_seconds
-          const res3 = await supabase.from('questions').upsert(payload).select('id').maybeSingle()
-          qData = res3.data
-          qError = res3.error
+        delete payload.time_limit_seconds
+        const durationColumn = _questionDurationColumn
+        if (durationColumn) payload[durationColumn] = estSeconds
+
+        const result = await supabase.from('questions').upsert(payload).select('id').maybeSingle()
+        qData = result.data
+        qError = result.error
+        if (!qError) break
+
+        // Only a confirmed missing-column error justifies changing schema mode.
+        // Never hide validation, RLS, FK, or other database failures.
+        const columnIsMissing = durationColumn !== null &&
+          (qError.code === 'PGRST204' || qError.code === '42703') &&
+          qError.message?.includes(`'${durationColumn}'`)
+        if (!columnIsMissing) break
+
+        // Compare-and-swap: concurrent imports must not undo a mode already
+        // discovered by another question save.
+        if (_questionDurationColumn === durationColumn) {
+          _questionDurationColumn = durationColumn === 'estimated_seconds' ? 'time_limit_seconds' : null
         }
       }
 
@@ -2564,6 +2577,7 @@ export const questionBankService = {
     }
     const list = this.getStoredQuestions()
     const targetId = String(id).trim()
+    const original = list.find((q) => String(q.id).trim() === targetId)
     let updatedItem: QuestionBankItem | null = null
     const updated = list.map((q) => {
       if (String(q.id).trim() === targetId) {
@@ -2572,8 +2586,97 @@ export const questionBankService = {
       }
       return q
     })
-    if (updatedItem) {
-      await this.syncQuestionToDatabase(updatedItem)
+    if (updatedItem && original) {
+      // The usual sync rebuilds choices, correct answers, and taxonomy links.
+      // For text/explanation/difficulty-only edits, preserve those dependent
+      // rows (and their IDs) by updating only the changed questions columns.
+      // All other edits retain the existing full-sync behavior.
+      const changedFields = (Object.keys(updatedItem) as Array<keyof QuestionBankItem>)
+        .filter((key) => key !== 'updatedAt' &&
+          JSON.stringify(original[key]) !== JSON.stringify(updatedItem![key]))
+      const simpleFields = new Set<keyof QuestionBankItem>(['prompt', 'explanation', 'difficulty'])
+      const isSimpleEdit = changedFields.length > 0 &&
+        changedFields.every((key) => simpleFields.has(key)) &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(targetId)
+
+      let savedByFastPath = false
+      if (isSimpleEdit) {
+        const needsPrompt = changedFields.includes('prompt')
+        const needsExplanation = changedFields.includes('explanation')
+        const payload: Record<string, unknown> = {}
+        if (changedFields.includes('difficulty')) payload.difficulty = updatedItem.difficulty
+
+        // Only the logged-in organization may be updated. This is intentional
+        // even on deployments where the legacy questions RLS is too permissive.
+        const { data: auth, error: authError } = await supabase.auth.getUser()
+        if (authError) throw authError
+        if (!auth.user?.id) throw new Error('Sign in before updating a question.')
+        const { data: profile, error: profileError } = await supabase.from('profiles')
+          .select('organization_id').eq('id', auth.user.id).single()
+        if (profileError) throw profileError
+        if (!profile?.organization_id) throw new Error('No organization is assigned to your account.')
+
+        if (needsPrompt || needsExplanation) {
+          const { data: persisted, error: readError } = await supabase.from('questions')
+            .select('content_blocks, explanation_blocks')
+            .eq('id', targetId)
+            .eq('organization_id', profile.organization_id)
+            .maybeSingle()
+          if (readError) throw readError
+          if (!persisted) throw new Error('Question not found in your organization. Refresh before editing.')
+
+          // Do not flatten rich content such as images, math, or tables. The
+          // simple path is valid only for the same plain-text representation
+          // that the current Question Bank editor loaded into its baseline.
+          if (needsPrompt) {
+            const blocks = persisted.content_blocks
+            const textBlocks = Array.isArray(blocks)
+              ? blocks.filter((block: any) => block?.type === 'text') : []
+            if (textBlocks.length === 1 &&
+                String(textBlocks[0].content ?? '') === String(original.prompt ?? '')) {
+              payload.content_blocks = blocks.map((block: any) => block?.type === 'text'
+                ? { ...block, content: (updatedItem!.prompt || 'Question Prompt').trim() }
+                : block)
+            } else if (textBlocks.length === 1) {
+              throw new Error('Question text changed since it was loaded. Refresh before saving.')
+            }
+          }
+          if (needsExplanation) {
+            const blocks = persisted.explanation_blocks
+            const textBlocks = Array.isArray(blocks)
+              ? blocks.filter((block: any) => block?.type === 'text') : []
+            if (Array.isArray(blocks) && blocks.length === 0 && !original.explanation) {
+              payload.explanation_blocks = updatedItem.explanation
+                ? [{ type: 'text', content: updatedItem.explanation }] : []
+            } else if (Array.isArray(blocks) && blocks.length === 1 &&
+                textBlocks.length === 1 &&
+                String(textBlocks[0].content ?? '') === String(original.explanation ?? '')) {
+              payload.explanation_blocks = updatedItem.explanation
+                ? [{ ...textBlocks[0], content: updatedItem.explanation }] : []
+            } else if (textBlocks.length === 1 && blocks.length === 1) {
+              throw new Error('Question explanation changed since it was loaded. Refresh before saving.')
+            }
+          }
+        }
+
+        // If this question uses a richer content representation than the
+        // simple path supports, fall back to the established sync method.
+        const allRequestedFieldsHandled =
+          (!needsPrompt || Object.prototype.hasOwnProperty.call(payload, 'content_blocks')) &&
+          (!needsExplanation || Object.prototype.hasOwnProperty.call(payload, 'explanation_blocks'))
+        if (allRequestedFieldsHandled) {
+          const { data: confirmed, error: updateError } = await supabase.from('questions')
+            .update(payload)
+            .eq('id', targetId)
+            .eq('organization_id', profile.organization_id)
+            .select('id')
+            .maybeSingle()
+          if (updateError) throw updateError
+          if (!confirmed?.id) throw new Error('Question edit was not saved. Refresh before retrying.')
+          savedByFastPath = true
+        }
+      }
+      if (!savedByFastPath) await this.syncQuestionToDatabase(updatedItem)
     }
     _questionsCache = updated
     return updatedItem
