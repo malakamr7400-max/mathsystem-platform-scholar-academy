@@ -618,7 +618,7 @@ let _hasLoadedQuestions = false
 // The Supabase schema differs between deployments. Once PostgREST confirms a
 // duration column is missing, remember that for this browser session instead of
 // repeating one or two failed HTTP requests for every question.
-let _questionDurationColumn: 'estimated_seconds' | 'time_limit_seconds' | null = 'estimated_seconds'
+let _questionDurationColumn: 'estimated_seconds' | 'time_limit_seconds' | null = null
 
 // Database-backed taxonomy cache - starts empty, strictly populated from database
 let _taxonomyCache: TaxonomyRegistry = {}
