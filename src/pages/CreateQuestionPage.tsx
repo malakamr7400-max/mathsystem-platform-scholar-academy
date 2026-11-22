@@ -1570,6 +1570,42 @@ export const CreateQuestionPage: React.FC = () => {
 
     let createdDraftNodeIds: string[] = []
     try {
+      // A wording, explanation, or difficulty-only edit can use the existing
+      // scoped updateQuestion fast path. Do not run the unit-of-work or full
+      // question sync for these edits: they rebuild answer/taxonomy relations.
+      // Compare the complete hydrated editor snapshot, not just form inputs,
+      // so media, collection, answers, and taxonomy edits retain the old path.
+      if (isEditing && questionId && initialEditorSnapshotRef.current &&
+          draftTaxonomyNodes.length === 0) {
+        const baseline = JSON.parse(initialEditorSnapshotRef.current) as Record<string, unknown>
+        const current = JSON.parse(editorSnapshot) as Record<string, unknown>
+        const changedKeys = Object.keys(current).filter(
+          (key) => JSON.stringify(current[key]) !== JSON.stringify(baseline[key])
+        )
+        const fastFields = new Set(['prompt', 'explanation', 'difficulty'])
+        // Staging-only field-name diagnostics; never log prompts, answers or IDs.
+        const blockingFields = changedKeys.filter((key) => !fastFields.has(key))
+        console.info('[Question Edit Step50J] Save route:', blockingFields.length === 0 && changedKeys.length > 0
+          ? 'fast path eligible'
+          : 'full sync required', { changedKeys, blockingFields, draftNodeCount: draftTaxonomyNodes.length })
+        if (changedKeys.length > 0 && changedKeys.every((key) => fastFields.has(key))) {
+          console.time('[Question Edit Step50J] fast database save')
+          const changes: Partial<QuestionBankItem> = {}
+          if (changedKeys.includes('prompt')) changes.prompt = questionItem.prompt
+          if (changedKeys.includes('explanation')) changes.explanation = questionItem.explanation
+          if (changedKeys.includes('difficulty')) changes.difficulty = questionItem.difficulty
+          let saved: QuestionBankItem | null
+          try {
+            saved = await questionBankService.updateQuestion(questionId, changes)
+          } finally {
+            console.timeEnd('[Question Edit Step50J] fast database save')
+          }
+          if (!saved) throw new Error('Question could not be found in the Question Bank. Refresh and try again.')
+          return saved
+        }
+      }
+
+      if (isEditing) console.time('[Question Edit Step50J] full database save')
       const draftResult = await persistDraftTaxonomy()
       questionItem.taxonomyNodeIds = draftResult.taxonomyNodeIds
       createdDraftNodeIds = draftResult.createdNodeIds
@@ -1614,6 +1650,7 @@ export const CreateQuestionPage: React.FC = () => {
       // Sync to Supabase so the generic question_taxonomy_nodes relationships
       // are saved together with the question. Legacy taxonomy fields remain intact.
       await questionBankService.syncQuestionToDatabase(questionItem)
+      if (isEditing) console.timeEnd('[Question Edit Step50J] full database save')
 
       return questionItem
     } catch (error) {
@@ -1672,7 +1709,7 @@ export const CreateQuestionPage: React.FC = () => {
     setSaveSuccessMessage(null)
 
     try {
-      const saved = await persistQuestion()
+      await persistQuestion()
 
       // The database save succeeded: lock the editor's dirty tracking before
       // clearing the context guard and navigating away.
@@ -1685,18 +1722,10 @@ export const CreateQuestionPage: React.FC = () => {
       markClean()
       setSaveSuccessMessage('Question saved.')
 
-      // Refresh the Question Bank cache, but do not let a cache-refresh issue
-      // turn a successful database save into a failed-save state.
-      try {
-        await questionBankService.fetchQuestionsFromDatabase()
-      } catch (refreshError) {
-        console.warn('Question saved, but refreshing the Question Bank cache failed:', refreshError)
-      }
-
-      window.setTimeout(() => {
-        markClean()
-        navigate('/admin/questions', { replace: true })
-      }, 2200)
+      // The destination Question Bank page loads fresh database data itself.
+      // Avoid an extra full-bank fetch and the artificial 2.2-second delay;
+      // navigate only after the authoritative save has completed successfully.
+      navigate('/admin/questions', { replace: true })
     } catch (err: any) {
       console.error('Save question error:', err)
       saveCompletedRef.current = false
