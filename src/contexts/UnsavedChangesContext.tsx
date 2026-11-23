@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useId, useRef, useState } from 'react'
-import { useBlocker, useBeforeUnload } from 'react-router-dom'
+import { useBlocker, useBeforeUnload, useLocation } from 'react-router-dom'
 
 interface UnsavedChangesRegistration {
   id: string
@@ -30,6 +30,12 @@ export function UnsavedChangesProvider({ children }: { children: React.ReactNode
   const [saveError, setSaveError] = useState<string | null>(null)
   const [discardError, setDiscardError] = useState<string | null>(null)
   const [suppressing, setSuppressing] = useState(false)
+  const location = useLocation()
+  // A successful save may navigate before React has committed the clean editor
+  // state. Keep suppression active for that specific navigation, not just one
+  // effect cycle. Re-arm once another edit follows a clean registration.
+  const suppressedLocationKeyRef = useRef<string | null>(null)
+  const cleanSeenAfterSuppressRef = useRef(false)
   const blocker = useBlocker(Boolean(registration?.isDirty && !suppressing))
 
   // Keep the unload guard in this shared provider so the application has one
@@ -45,6 +51,16 @@ export function UnsavedChangesProvider({ children }: { children: React.ReactNode
   )
 
   const register = useCallback((next: UnsavedChangesRegistration) => {
+    if (suppressedLocationKeyRef.current !== null) {
+      if (!next.isDirty) {
+        cleanSeenAfterSuppressRef.current = true
+      } else if (cleanSeenAfterSuppressRef.current) {
+        // A new edit made after saving must be protected again.
+        suppressedLocationKeyRef.current = null
+        cleanSeenAfterSuppressRef.current = false
+        setSuppressing(false)
+      }
+    }
     registrationRef.current = next
     setRegistration((current) => {
       if (
@@ -76,16 +92,22 @@ export function UnsavedChangesProvider({ children }: { children: React.ReactNode
   }, [])
 
   const suppress = useCallback(() => {
+    suppressedLocationKeyRef.current = location.key
+    cleanSeenAfterSuppressRef.current = false
     setSuppressing(true)
     registrationRef.current = null
     setRegistration(null)
-  }, [])
+  }, [location.key])
 
   useEffect(() => {
-    if (!suppressing) return
-    blocker.reset?.()
-    setSuppressing(false)
-  }, [suppressing, blocker])
+    // Once navigation completes, resume normal protection for the next page.
+    if (suppressedLocationKeyRef.current !== null &&
+        suppressedLocationKeyRef.current !== location.key) {
+      suppressedLocationKeyRef.current = null
+      cleanSeenAfterSuppressRef.current = false
+      setSuppressing(false)
+    }
+  }, [location.key])
 
   const handleDiscard = async () => {
     if (discarding) return
